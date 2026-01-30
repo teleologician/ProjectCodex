@@ -1,5 +1,8 @@
 #include <cstdlib>
 #include <iostream>
+#include <random>
+#include <string>
+#include <vector>
 
 #include <glad/glad.h>
 #include <SDL2/SDL.h>
@@ -203,9 +206,53 @@ int main() {
     GLint mvp_location = glGetUniformLocation(program, "uMVP");
     GLint color_location = glGetUniformLocation(program, "uColor");
 
+    struct Enemy {
+        glm::vec3 position;
+        float speed;
+        int health;
+    };
+
+    struct ExperienceGem {
+        glm::vec3 position;
+    };
+
     glm::vec3 player_position(0.0f, 0.0f, 0.0f);
+    int player_health = 10;
+    int player_xp = 0;
     const float player_speed = 4.0f;
     const glm::vec3 camera_offset(0.0f, 5.0f, 7.0f);
+    const float play_area_extent = 12.0f;
+
+    std::mt19937 rng(std::random_device{}());
+    std::uniform_real_distribution<float> side_dist(0.0f, 1.0f);
+    std::uniform_real_distribution<float> edge_dist(-play_area_extent, play_area_extent);
+    std::uniform_real_distribution<float> speed_dist(1.2f, 2.4f);
+
+    std::vector<Enemy> enemies;
+    std::vector<ExperienceGem> gems;
+    float spawn_timer = 0.0f;
+    const float spawn_interval = 2.0f;
+    float attack_timer = 0.0f;
+    const float attack_interval = 1.0f;
+    const float attack_radius = 2.2f;
+    float player_damage_timer = 0.0f;
+    const float player_damage_interval = 0.7f;
+    const float player_contact_radius = 0.9f;
+
+    auto spawn_enemy = [&]() {
+        float side = side_dist(rng);
+        glm::vec3 position(0.0f);
+        if (side < 0.25f) {
+            position = glm::vec3(-play_area_extent, 0.0f, edge_dist(rng));
+        } else if (side < 0.5f) {
+            position = glm::vec3(play_area_extent, 0.0f, edge_dist(rng));
+        } else if (side < 0.75f) {
+            position = glm::vec3(edge_dist(rng), 0.0f, -play_area_extent);
+        } else {
+            position = glm::vec3(edge_dist(rng), 0.0f, play_area_extent);
+        }
+        enemies.push_back(Enemy{position, speed_dist(rng), 3});
+    };
 
     Uint64 last_ticks = SDL_GetPerformanceCounter();
     bool running = true;
@@ -227,6 +274,10 @@ int main() {
             }
         }
 
+        if (player_health <= 0) {
+            running = false;
+        }
+
         const Uint8* keys = SDL_GetKeyboardState(nullptr);
         glm::vec3 move(0.0f);
         if (keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) {
@@ -245,6 +296,73 @@ int main() {
             move = glm::normalize(move);
         }
         player_position += move * player_speed * delta_time;
+        player_position.x = glm::clamp(player_position.x, -play_area_extent, play_area_extent);
+        player_position.z = glm::clamp(player_position.z, -play_area_extent, play_area_extent);
+
+        spawn_timer += delta_time;
+        if (spawn_timer >= spawn_interval) {
+            spawn_timer = 0.0f;
+            spawn_enemy();
+        }
+
+        for (Enemy& enemy : enemies) {
+            glm::vec3 to_player = player_position - enemy.position;
+            to_player.y = 0.0f;
+            float distance = glm::length(to_player);
+            if (distance > 0.001f) {
+                glm::vec3 direction = to_player / distance;
+                enemy.position += direction * enemy.speed * delta_time;
+            }
+        }
+
+        attack_timer += delta_time;
+        if (attack_timer >= attack_interval) {
+            attack_timer = 0.0f;
+            for (Enemy& enemy : enemies) {
+                glm::vec3 delta = enemy.position - player_position;
+                delta.y = 0.0f;
+                if (glm::length(delta) <= attack_radius) {
+                    enemy.health -= 1;
+                }
+            }
+        }
+
+        bool player_contact = false;
+        for (const Enemy& enemy : enemies) {
+            glm::vec3 delta = enemy.position - player_position;
+            delta.y = 0.0f;
+            if (glm::length(delta) <= player_contact_radius) {
+                player_contact = true;
+                break;
+            }
+        }
+        player_damage_timer += delta_time;
+        if (player_contact && player_damage_timer >= player_damage_interval) {
+            player_damage_timer = 0.0f;
+            player_health -= 1;
+        }
+
+        for (size_t i = 0; i < enemies.size();) {
+            if (enemies[i].health <= 0) {
+                gems.push_back(ExperienceGem{enemies[i].position});
+                enemies[i] = enemies.back();
+                enemies.pop_back();
+            } else {
+                ++i;
+            }
+        }
+
+        for (size_t i = 0; i < gems.size();) {
+            glm::vec3 delta = gems[i].position - player_position;
+            delta.y = 0.0f;
+            if (glm::length(delta) <= 1.0f) {
+                player_xp += 1;
+                gems[i] = gems.back();
+                gems.pop_back();
+            } else {
+                ++i;
+            }
+        }
 
         glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -278,6 +396,37 @@ int main() {
         glBindVertexArray(cube_vao);
         glDrawArrays(GL_TRIANGLES, 0, 36);
         glBindVertexArray(0);
+
+        for (const Enemy& enemy : enemies) {
+            glm::mat4 enemy_model = glm::translate(
+                glm::mat4(1.0f),
+                enemy.position + glm::vec3(0.0f, 0.35f, 0.0f));
+            enemy_model = glm::scale(enemy_model, glm::vec3(0.7f));
+            glm::mat4 enemy_mvp = projection * view * enemy_model;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(enemy_mvp));
+            glUniform3f(color_location, 0.75f, 0.38f, 0.18f);
+            glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+        }
+
+        for (const ExperienceGem& gem : gems) {
+            glm::mat4 gem_model = glm::translate(
+                glm::mat4(1.0f),
+                gem.position + glm::vec3(0.0f, 0.2f, 0.0f));
+            gem_model = glm::scale(gem_model, glm::vec3(0.3f));
+            glm::mat4 gem_mvp = projection * view * gem_model;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(gem_mvp));
+            glUniform3f(color_location, 0.20f, 0.65f, 0.95f);
+            glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+        }
+
+        std::string hud = "HP " + std::to_string(player_health) +
+                          " | XP " + std::to_string(player_xp) +
+                          " | Enemies " + std::to_string(enemies.size());
+        SDL_SetWindowTitle(window, hud.c_str());
 
         SDL_GL_SwapWindow(window);
     }
