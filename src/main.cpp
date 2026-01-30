@@ -2,6 +2,7 @@
 #include <iostream>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -274,6 +275,97 @@ std::vector<float> BuildCylinderVertices(int slices, float radius, float height)
     return vertices;
 }
 
+constexpr int kGridW = 10;
+constexpr int kGridH = 10;
+constexpr float kTileSize = 5.0f;
+constexpr float kLevelStep = 5.0f;
+// 0 = flat, 1 = ramp +X, 2 = ramp -X, 3 = ramp +Z, 4 = ramp -Z
+static const int kHeightMap[kGridH][kGridW] = {
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 1, 1, 0, 0, 0, 0, 0},
+    {0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 1, 2, 2, 1, 0, 0, 1, 1},
+    {0, 0, 1, 2, 2, 1, 0, 0, 2, 2},
+    {0, 0, 1, 2, 2, 1, 0, 0, 2, 2},
+    {0, 0, 1, 1, 1, 0, 0, 0, 1, 1},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+};
+
+int TileLevel(int tx, int tz) {
+    if (tx < 0 || tz < 0 || tx >= kGridW || tz >= kGridH) {
+        return 0;
+    }
+    return kHeightMap[tz][tx];
+}
+
+int RampDirAt(int tx, int tz) {
+    int level = TileLevel(tx, tz);
+    if (TileLevel(tx + 1, tz) == level + 1) {
+        return 1;
+    }
+    if (TileLevel(tx - 1, tz) == level + 1) {
+        return 2;
+    }
+    if (TileLevel(tx, tz + 1) == level + 1) {
+        return 3;
+    }
+    if (TileLevel(tx, tz - 1) == level + 1) {
+        return 4;
+    }
+    return 0;
+}
+
+float TerrainHeight(float x, float z) {
+    float half = (kGridW * kTileSize) * 0.5f;
+    float local_x = x + half;
+    float local_z = z + half;
+    int tx = static_cast<int>(std::floor(local_x / kTileSize));
+    int tz = static_cast<int>(std::floor(local_z / kTileSize));
+    if (tx < 0 || tz < 0 || tx >= kGridW || tz >= kGridH) {
+        return 0.0f;
+    }
+    float base = static_cast<float>(TileLevel(tx, tz)) * kLevelStep;
+    float u = (local_x - tx * kTileSize) / kTileSize;
+    float v = (local_z - tz * kTileSize) / kTileSize;
+    int ramp = RampDirAt(tx, tz);
+    if (ramp == 1) {
+        return base + u * kLevelStep;
+    }
+    if (ramp == 2) {
+        return base + (1.0f - u) * kLevelStep;
+    }
+    if (ramp == 3) {
+        return base + v * kLevelStep;
+    }
+    if (ramp == 4) {
+        return base + (1.0f - v) * kLevelStep;
+    }
+
+    // Soft ramp bands near edges when adjacent tile is higher.
+    const float ramp_band = 0.25f;
+    float height = base;
+    int level = TileLevel(tx, tz);
+    if (TileLevel(tx + 1, tz) == level + 1 && u > 1.0f - ramp_band) {
+        float t = (u - (1.0f - ramp_band)) / ramp_band;
+        height = base + t * kLevelStep;
+    }
+    if (TileLevel(tx - 1, tz) == level + 1 && u < ramp_band) {
+        float t = (ramp_band - u) / ramp_band;
+        height = base + t * kLevelStep;
+    }
+    if (TileLevel(tx, tz + 1) == level + 1 && v > 1.0f - ramp_band) {
+        float t = (v - (1.0f - ramp_band)) / ramp_band;
+        height = base + t * kLevelStep;
+    }
+    if (TileLevel(tx, tz - 1) == level + 1 && v < ramp_band) {
+        float t = (ramp_band - v) / ramp_band;
+        height = base + t * kLevelStep;
+    }
+    return height;
+}
+
 Mesh CreateMesh(const std::vector<float>& vertices) {
     Mesh mesh;
     glGenVertexArrays(1, &mesh.vao);
@@ -346,17 +438,23 @@ int main() {
     const char* vertex_source =
         "#version 330 core\n"
         "layout (location = 0) in vec3 aPos;\n"
+        "layout (location = 1) in vec3 aColor;\n"
+        "out vec3 vColor;\n"
         "uniform mat4 uMVP;\n"
+        "uniform int uUseVertexColor;\n"
+        "uniform vec3 uColor;\n"
         "void main() {\n"
+        "    vColor = (uUseVertexColor == 1) ? aColor : uColor;\n"
         "    gl_Position = uMVP * vec4(aPos, 1.0);\n"
         "}\n";
 
     const char* fragment_source =
         "#version 330 core\n"
+        "in vec3 vColor;\n"
         "out vec4 FragColor;\n"
-        "uniform vec3 uColor;\n"
+        "uniform float uAlpha;\n"
         "void main() {\n"
-        "    FragColor = vec4(uColor, 1.0);\n"
+        "    FragColor = vec4(vColor, uAlpha);\n"
         "}\n";
 
     const char* text_vertex_source =
@@ -397,6 +495,7 @@ int main() {
         "out vec4 FragColor;\n"
         "uniform vec3 uColor;\n"
         "uniform float uPhase;\n"
+        "uniform float uAlpha;\n"
         "void main() {\n"
         "    float dist = length(vLocal);\n"
         "    float rise = smoothstep(0.0, 0.45, uPhase);\n"
@@ -406,7 +505,7 @@ int main() {
         "    float thickness = mix(0.25, 0.10, rise);\n"
         "    float edge = abs(dist - radius);\n"
         "    float ring = smoothstep(thickness, 0.0, edge);\n"
-        "    float alpha = ring * (0.25 + 0.75 * pulse);\n"
+        "    float alpha = ring * (0.25 + 0.75 * pulse) * uAlpha;\n"
         "    if (alpha <= 0.01) discard;\n"
         "    FragColor = vec4(uColor, alpha);\n"
         "}\n";
@@ -479,15 +578,43 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    float ground_vertices[] = {
-        -10.0f, 0.0f, -10.0f,
-         10.0f, 0.0f, -10.0f,
-         10.0f, 0.0f,  10.0f,
+    std::vector<float> ground_vertices;
+    std::vector<glm::vec2> ground_tile_centers;
+    const int ground_steps = kGridW;
+    const float ground_extent = (kGridW * kTileSize) * 0.5f;
+    const float ground_step = kTileSize;
+    for (int x = 0; x < ground_steps; ++x) {
+        for (int z = 0; z < ground_steps; ++z) {
+            float x0 = -ground_extent + x * ground_step;
+            float x1 = x0 + ground_step;
+            float z0 = -ground_extent + z * ground_step;
+            float z1 = z0 + ground_step;
+            glm::vec3 p00(x0, TerrainHeight(x0, z0), z0);
+            glm::vec3 p10(x1, TerrainHeight(x1, z0), z0);
+            glm::vec3 p01(x0, TerrainHeight(x0, z1), z1);
+            glm::vec3 p11(x1, TerrainHeight(x1, z1), z1);
 
-        -10.0f, 0.0f, -10.0f,
-         10.0f, 0.0f,  10.0f,
-        -10.0f, 0.0f,  10.0f
-    };
+            glm::vec3 tri1[3] = {p00, p11, p10};
+            glm::vec3 tri2[3] = {p00, p01, p11};
+            for (int k = 0; k < 3; ++k) {
+                ground_vertices.push_back(tri1[k].x);
+                ground_vertices.push_back(tri1[k].y);
+                ground_vertices.push_back(tri1[k].z);
+                ground_vertices.push_back(0.08f);
+                ground_vertices.push_back(0.10f);
+                ground_vertices.push_back(0.14f);
+            }
+            for (int k = 0; k < 3; ++k) {
+                ground_vertices.push_back(tri2[k].x);
+                ground_vertices.push_back(tri2[k].y);
+                ground_vertices.push_back(tri2[k].z);
+                ground_vertices.push_back(0.08f);
+                ground_vertices.push_back(0.10f);
+                ground_vertices.push_back(0.14f);
+            }
+            ground_tile_centers.push_back(glm::vec2((x0 + x1) * 0.5f, (z0 + z1) * 0.5f));
+        }
+    }
 
     float cube_vertices[] = {
         -0.5f, -0.5f, -0.5f,
@@ -559,8 +686,11 @@ int main() {
     glGenBuffers(1, &ground_vbo);
     glBindVertexArray(ground_vao);
     glBindBuffer(GL_ARRAY_BUFFER, ground_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(ground_vertices), ground_vertices, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+    glBufferData(GL_ARRAY_BUFFER, ground_vertices.size() * sizeof(float), ground_vertices.data(), GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                          reinterpret_cast<void*>(3 * sizeof(float)));
     glEnableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
@@ -622,12 +752,15 @@ int main() {
 
     GLint mvp_location = glGetUniformLocation(program, "uMVP");
     GLint color_location = glGetUniformLocation(program, "uColor");
+    GLint alpha_location = glGetUniformLocation(program, "uAlpha");
+    GLint use_vertex_color_location = glGetUniformLocation(program, "uUseVertexColor");
     GLint text_mvp_location = glGetUniformLocation(text_program, "uMVP");
     GLint text_tint_location = glGetUniformLocation(text_program, "uTint");
     GLint text_texture_location = glGetUniformLocation(text_program, "uTexture");
     GLint ring_mvp_location = glGetUniformLocation(ring_program, "uMVP");
     GLint ring_color_location = glGetUniformLocation(ring_program, "uColor");
     GLint ring_phase_location = glGetUniformLocation(ring_program, "uPhase");
+    GLint ring_alpha_location = glGetUniformLocation(ring_program, "uAlpha");
 
     TTF_Font* ui_font = LoadUIFont(18);
     TTF_Font* ui_font_small = LoadUIFont(14);
@@ -644,6 +777,7 @@ int main() {
         glm::vec3 color;
         float phase;
         int type;
+        bool elite;
     };
 
     struct ExperienceGem {
@@ -662,6 +796,11 @@ int main() {
         PickupType type;
     };
 
+    struct Obstacle {
+        glm::vec2 min;
+        glm::vec2 max;
+    };
+
     struct Projectile {
         glm::vec3 position;
         glm::vec3 velocity;
@@ -669,10 +808,25 @@ int main() {
         int damage;
     };
 
+    struct Bomb {
+        glm::vec3 position;
+        glm::vec3 velocity;
+        float timer;
+    };
+
+    struct Explosion {
+        glm::vec3 position;
+        float timer;
+        float duration;
+        float radius;
+    };
+
     enum class ItemId {
         Fireball,
         FireballUpgrade,
         GarlicUpgrade,
+        Bomb,
+        BombUpgrade,
         MaxHealth,
         MoveSpeed,
         AttackCooldown
@@ -706,6 +860,7 @@ int main() {
     bool skin_selected = skin_unlocked;
 
     int main_menu_index = 0;
+    int starter_weapon_index = 0;
     int powerup_menu_index = 0;
     GameState state = GameState::MainMenu;
     bool victory = false;
@@ -721,8 +876,12 @@ int main() {
     int player_health = 10;
     int player_max_health = 10;
     float player_speed = 4.0f;
+    glm::vec3 player_aim_dir(0.0f, 0.0f, -1.0f);
     const glm::vec3 camera_offset(0.0f, 5.0f, 7.0f);
-    const float play_area_extent = 12.0f;
+    float camera_yaw = glm::radians(180.0f);
+    float camera_pitch = glm::radians(-20.0f);
+    float camera_distance = 9.0f;
+    const float play_area_extent = 25.0f;
 
     std::mt19937 rng(std::random_device{}());
     std::uniform_real_distribution<float> side_dist(0.0f, 1.0f);
@@ -733,7 +892,10 @@ int main() {
     std::vector<Enemy> enemies;
     std::vector<ExperienceGem> gems;
     std::vector<Projectile> projectiles;
+    std::vector<Bomb> bombs;
+    std::vector<Explosion> explosions;
     std::vector<Pickup> pickups;
+    std::vector<Obstacle> obstacles;
     float spawn_timer = 0.0f;
     int early_spawn_index = 0;
     const float base_spawn_interval = 2.0f;
@@ -750,10 +912,55 @@ int main() {
     float fireball_timer = 0.0f;
     float fireball_cooldown = 1.5f;
     int fireball_damage = 2;
+    int bomb_level = 0;
+    float bomb_timer = 0.0f;
+    float bomb_cooldown = 2.5f;
+    float bomb_radius = 2.8f;
+    int bomb_damage = 4;
 
     float freeze_timer = 0.0f;
+    float nuke_flash_timer = 0.0f;
+    float jump_timer = 0.0f;
+    float jump_cooldown_timer = 0.0f;
+    const float jump_duration = 0.35f;
+    const float jump_cooldown = 0.8f;
+    const float jump_height = 1.2f;
 
     std::vector<ItemChoice> current_choices;
+
+    // Build obstacle list for city blocks.
+    const int city_half = 4;
+    const float block_size = 5.0f;
+    const float block_half = 1.1f;
+    obstacles.clear();
+    for (int x = -city_half; x <= city_half; ++x) {
+        for (int z = -city_half; z <= city_half; ++z) {
+            if ((x + z) % 2 != 0) {
+                continue;
+            }
+            if (x == 0 && z == 0) {
+                continue;
+            }
+            float wx = static_cast<float>(x) * block_size;
+            float wz = static_cast<float>(z) * block_size;
+            int tx = static_cast<int>(std::floor((wx + (kGridW * kTileSize) * 0.5f) / block_size));
+            int tz = static_cast<int>(std::floor((wz + (kGridH * kTileSize) * 0.5f) / block_size));
+            if (tx < 0 || tz < 0 || tx >= kGridW || tz >= kGridH) {
+                continue;
+            }
+            int ramp_type = RampDirAt(tx, tz);
+            int tile_height = TileLevel(tx, tz);
+            if (ramp_type != 0 || tile_height < 1) {
+                continue;
+            }
+            glm::vec2 center(static_cast<float>(x) * block_size,
+                             static_cast<float>(z) * block_size);
+            Obstacle box;
+            box.min = center - glm::vec2(block_half, block_half);
+            box.max = center + glm::vec2(block_half, block_half);
+            obstacles.push_back(box);
+        }
+    }
 
     auto spawn_enemy = [&]() {
         float side = side_dist(rng);
@@ -777,8 +984,9 @@ int main() {
         float speed = speed_dist(rng);
         int damage = 1;
         float scale = 0.7f;
-        glm::vec3 color(0.75f, 0.38f, 0.18f);
+        glm::vec3 color(0.35f, 0.55f, 0.85f);
         int type = 0;
+        bool elite = false;
 
         if (run_time < 60.0f) {
             int cycle = early_spawn_index % 4;
@@ -793,7 +1001,7 @@ int main() {
                 color = glm::vec3(0.85f, 0.30f, 0.55f);
                 type = 1;
             } else if (cycle == 2) {
-                health += 6;
+                health += 5;
                 speed *= 0.6f;
                 damage = 2;
                 scale = 1.0f;
@@ -815,7 +1023,7 @@ int main() {
             color = glm::vec3(0.30f, 0.70f, 0.35f);
             type = 3;
         } else if (allow_tank && roll < 30) {
-            health += 6;
+            health += 5;
             speed *= 0.6f;
             damage = 2;
             scale = 1.0f;
@@ -830,8 +1038,17 @@ int main() {
             type = 1;
         }
 
+        position.y = TerrainHeight(position.x, position.z);
+        if (run_time >= 90.0f && unit_dist(rng) < 0.12f) {
+            elite = true;
+            health += 6;
+            damage += 1;
+            scale *= 1.15f;
+            color = glm::vec3(0.95f, 0.80f, 0.25f);
+        }
+
         float phase = unit_dist(rng) * glm::two_pi<float>();
-        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type});
+        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite});
     };
 
     auto save_progress = [&]() {
@@ -848,10 +1065,13 @@ int main() {
         enemies.clear();
         gems.clear();
         projectiles.clear();
+        bombs.clear();
+        explosions.clear();
         current_choices.clear();
         pickups.clear();
 
         player_position = glm::vec3(0.0f, 0.0f, 0.0f);
+        player_position.y = TerrainHeight(player_position.x, player_position.z);
         player_level = 1;
         player_xp = 0;
         player_max_health = 10 + meta_max_health_level;
@@ -861,11 +1081,16 @@ int main() {
         attack_radius = 2.2f;
         attack_damage = 1 + meta_damage_level;
 
-        garlic_level = 1;
-        fireball_level = 0;
+        garlic_level = starter_weapon_index == 0 ? 1 : 0;
+        fireball_level = starter_weapon_index == 1 ? 1 : 0;
         fireball_timer = 0.0f;
         fireball_cooldown = 1.5f;
         fireball_damage = 2 + meta_damage_level;
+        bomb_level = starter_weapon_index == 2 ? 1 : 0;
+        bomb_timer = 0.0f;
+        bomb_cooldown = 2.5f;
+        bomb_radius = 2.8f;
+        bomb_damage = 4 + meta_damage_level;
 
         spawn_timer = 0.0f;
         early_spawn_index = 0;
@@ -942,6 +1167,8 @@ int main() {
 
         DestroyTextTexture(&texture);
         glUseProgram(program);
+        glUniform1f(alpha_location, 1.0f);
+        glUniform1i(use_vertex_color_location, 0);
     };
 
     auto draw_text = [&](float x, float y, const std::string& text, SDL_Color color,
@@ -992,9 +1219,16 @@ int main() {
         glUseProgram(program);
     };
 
+    auto circle_intersects_aabb = [&](const glm::vec2& center, float radius, const Obstacle& box) {
+        glm::vec2 closest = glm::clamp(center, box.min, box.max);
+        glm::vec2 delta = center - closest;
+        return glm::dot(delta, delta) < radius * radius;
+    };
+
     Uint64 last_ticks = SDL_GetPerformanceCounter();
     bool running = true;
     while (running) {
+        SDL_SetRelativeMouseMode(state == GameState::Running ? SDL_TRUE : SDL_FALSE);
         Uint64 current_ticks = SDL_GetPerformanceCounter();
         float delta_time = static_cast<float>(current_ticks - last_ticks) /
                            static_cast<float>(SDL_GetPerformanceFrequency());
@@ -1016,6 +1250,10 @@ int main() {
                         main_menu_index = (main_menu_index + 2) % 3;
                     } else if (key == SDLK_DOWN || key == SDLK_s) {
                         main_menu_index = (main_menu_index + 1) % 3;
+                    } else if (key == SDLK_LEFT || key == SDLK_a) {
+                        starter_weapon_index = (starter_weapon_index + 2) % 3;
+                    } else if (key == SDLK_RIGHT || key == SDLK_d) {
+                        starter_weapon_index = (starter_weapon_index + 1) % 3;
                     } else if (key == SDLK_RETURN || key == SDLK_SPACE) {
                         if (main_menu_index == 0) {
                             start_run();
@@ -1111,11 +1349,23 @@ int main() {
                                 fireball_damage += 1;
                                 fireball_cooldown = glm::max(0.6f, fireball_cooldown - 0.1f);
                                 break;
-                            case ItemId::GarlicUpgrade:
-                                garlic_level += 1;
-                                attack_damage += 1;
-                                attack_radius += 0.2f;
-                                break;
+                        case ItemId::GarlicUpgrade:
+                            garlic_level += 1;
+                            attack_damage += 1;
+                            attack_radius += 0.2f;
+                            break;
+                        case ItemId::Bomb:
+                            bomb_level = 1;
+                            bomb_damage = 4 + meta_damage_level;
+                            bomb_cooldown = 2.5f;
+                            bomb_radius = 2.8f;
+                            break;
+                        case ItemId::BombUpgrade:
+                            bomb_level += 1;
+                            bomb_damage += 2;
+                            bomb_radius += 0.3f;
+                            bomb_cooldown = glm::max(1.2f, bomb_cooldown - 0.2f);
+                            break;
                             case ItemId::MaxHealth: {
                                 int bonus = static_cast<int>(std::ceil(player_max_health * 0.2f));
                                 player_max_health += bonus;
@@ -1133,6 +1383,14 @@ int main() {
                         state = GameState::Running;
                     }
                 }
+            } else if (event.type == SDL_MOUSEMOTION && state == GameState::Running) {
+                const float sensitivity = 0.0018f;
+                camera_yaw += static_cast<float>(event.motion.xrel) * sensitivity;
+                camera_pitch += static_cast<float>(event.motion.yrel) * sensitivity;
+                camera_pitch = glm::clamp(camera_pitch, glm::radians(-45.0f), glm::radians(10.0f));
+            } else if (event.type == SDL_MOUSEWHEEL && state == GameState::Running) {
+                camera_distance -= static_cast<float>(event.wheel.y) * 0.6f;
+                camera_distance = glm::clamp(camera_distance, 4.0f, 16.0f);
             }
         }
 
@@ -1143,25 +1401,86 @@ int main() {
             }
             if (state == GameState::Running) {
             const Uint8* keys = SDL_GetKeyboardState(nullptr);
-            glm::vec3 move(0.0f);
+            glm::vec3 input(0.0f);
             if (keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) {
-                move.z -= 1.0f;
+                input.z += 1.0f;
             }
             if (keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN]) {
-                move.z += 1.0f;
+                input.z -= 1.0f;
             }
             if (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]) {
-                move.x -= 1.0f;
+                input.x -= 1.0f;
             }
             if (keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) {
-                move.x += 1.0f;
+                input.x += 1.0f;
             }
+            glm::vec3 forward = glm::normalize(glm::vec3(
+                std::cos(camera_yaw), 0.0f, std::sin(camera_yaw)));
+            glm::vec3 right = glm::normalize(glm::vec3(-forward.z, 0.0f, forward.x));
+            glm::vec3 move = input.x * right + input.z * forward;
             if (glm::length(move) > 0.0f) {
                 move = glm::normalize(move);
+                player_aim_dir = forward;
             }
-            player_position += move * player_speed * delta_time;
-            player_position.x = glm::clamp(player_position.x, -play_area_extent, play_area_extent);
-            player_position.z = glm::clamp(player_position.z, -play_area_extent, play_area_extent);
+            if (jump_cooldown_timer > 0.0f) {
+                jump_cooldown_timer = glm::max(0.0f, jump_cooldown_timer - delta_time);
+            }
+            if (jump_timer <= 0.0f && jump_cooldown_timer <= 0.0f &&
+                (keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_LSHIFT])) {
+                jump_timer = jump_duration;
+                jump_cooldown_timer = jump_cooldown;
+            }
+            glm::vec3 desired = player_position + move * player_speed * delta_time;
+            desired.x = glm::clamp(desired.x, -play_area_extent, play_area_extent);
+            desired.z = glm::clamp(desired.z, -play_area_extent, play_area_extent);
+            desired.y = TerrainHeight(desired.x, desired.z);
+
+            const float player_radius = 0.6f;
+            glm::vec2 desired_xz(desired.x, desired.z);
+            bool blocked = false;
+            for (const Obstacle& box : obstacles) {
+                if (circle_intersects_aabb(desired_xz, player_radius, box)) {
+                    blocked = true;
+                    break;
+                }
+            }
+                if (!blocked) {
+                    player_position.x = desired.x;
+                    player_position.z = desired.z;
+                    player_position.y = glm::mix(player_position.y, desired.y, 0.25f);
+                } else {
+                    glm::vec3 slide_x = player_position + glm::vec3(move.x, 0.0f, 0.0f) * player_speed * delta_time;
+                    slide_x.x = glm::clamp(slide_x.x, -play_area_extent, play_area_extent);
+                    slide_x.y = TerrainHeight(slide_x.x, slide_x.z);
+                    glm::vec2 slide_xz(slide_x.x, player_position.z);
+                    bool blocked_x = false;
+                for (const Obstacle& box : obstacles) {
+                    if (circle_intersects_aabb(slide_xz, player_radius, box)) {
+                        blocked_x = true;
+                        break;
+                    }
+                }
+                    if (!blocked_x) {
+                        player_position.x = slide_x.x;
+                        player_position.y = glm::mix(player_position.y, slide_x.y, 0.25f);
+                    }
+
+                    glm::vec3 slide_z = player_position + glm::vec3(0.0f, 0.0f, move.z) * player_speed * delta_time;
+                    slide_z.z = glm::clamp(slide_z.z, -play_area_extent, play_area_extent);
+                    slide_z.y = TerrainHeight(slide_z.x, slide_z.z);
+                    glm::vec2 slide_zz(player_position.x, slide_z.z);
+                    bool blocked_z = false;
+                for (const Obstacle& box : obstacles) {
+                    if (circle_intersects_aabb(slide_zz, player_radius, box)) {
+                        blocked_z = true;
+                        break;
+                    }
+                }
+                    if (!blocked_z) {
+                        player_position.z = slide_z.z;
+                        player_position.y = glm::mix(player_position.y, slide_z.y, 0.25f);
+                    }
+                }
 
             float spawn_interval = glm::max(0.5f, base_spawn_interval - player_level * 0.05f);
             spawn_interval = glm::max(0.35f, spawn_interval - run_time * 0.01f);
@@ -1186,44 +1505,144 @@ int main() {
                     float distance = glm::length(to_player);
                     if (distance > 0.001f) {
                         glm::vec3 direction = to_player / distance;
-                        enemy.position += direction * enemy.speed * delta_time;
+                        glm::vec3 desired_enemy = enemy.position + direction * enemy.speed * delta_time;
+                        glm::vec2 desired_enemy_xz(desired_enemy.x, desired_enemy.z);
+                        bool blocked_enemy = false;
+                        for (const Obstacle& box : obstacles) {
+                                if (circle_intersects_aabb(desired_enemy_xz, enemy.scale * 0.55f, box)) {
+                                blocked_enemy = true;
+                                break;
+                            }
+                        }
+                        if (!blocked_enemy) {
+                            enemy.position.x = desired_enemy.x;
+                            enemy.position.z = desired_enemy.z;
+                            enemy.position.y = glm::mix(enemy.position.y,
+                                                       TerrainHeight(enemy.position.x, enemy.position.z), 0.25f);
+                        } else {
+                            glm::vec3 slide_x = enemy.position + glm::vec3(direction.x, 0.0f, 0.0f)
+                                                * enemy.speed * delta_time;
+                            slide_x.y = TerrainHeight(slide_x.x, slide_x.z);
+                            glm::vec2 slide_xz(slide_x.x, enemy.position.z);
+                            bool blocked_x = false;
+                            for (const Obstacle& box : obstacles) {
+                                if (circle_intersects_aabb(slide_xz, enemy.scale * 0.55f, box)) {
+                                    blocked_x = true;
+                                    break;
+                                }
+                            }
+                            if (!blocked_x) {
+                                enemy.position.x = slide_x.x;
+                                enemy.position.y = glm::mix(enemy.position.y, slide_x.y, 0.25f);
+                            } else {
+                                glm::vec3 slide_z = enemy.position + glm::vec3(0.0f, 0.0f, direction.z)
+                                                    * enemy.speed * delta_time;
+                                slide_z.y = TerrainHeight(slide_z.x, slide_z.z);
+                                glm::vec2 slide_zz(enemy.position.x, slide_z.z);
+                                bool blocked_z = false;
+                                for (const Obstacle& box : obstacles) {
+                                if (circle_intersects_aabb(slide_zz, enemy.scale * 0.55f, box)) {
+                                        blocked_z = true;
+                                        break;
+                                    }
+                                }
+                                if (!blocked_z) {
+                                    enemy.position.z = slide_z.z;
+                                    enemy.position.y = glm::mix(enemy.position.y, slide_z.y, 0.25f);
+                                }
+                            }
+                        }
                     }
                 }
             }
 
-            attack_timer += delta_time;
-            if (attack_timer >= attack_interval) {
-                attack_timer = 0.0f;
-                for (Enemy& enemy : enemies) {
-                    glm::vec3 delta = enemy.position - player_position;
-                    delta.y = 0.0f;
-                    if (glm::length(delta) <= attack_radius) {
-                        enemy.health -= attack_damage;
+            if (jump_timer > 0.0f) {
+                jump_timer = glm::max(0.0f, jump_timer - delta_time);
+            }
+            if (nuke_flash_timer > 0.0f) {
+                nuke_flash_timer = glm::max(0.0f, nuke_flash_timer - delta_time);
+            }
+
+            if (garlic_level > 0) {
+                attack_timer += delta_time;
+                if (attack_timer >= attack_interval) {
+                    attack_timer = 0.0f;
+                    for (Enemy& enemy : enemies) {
+                        glm::vec3 delta = enemy.position - player_position;
+                        delta.y = 0.0f;
+                        if (glm::length(delta) <= attack_radius) {
+                            enemy.health -= attack_damage;
+                        }
                     }
                 }
             }
 
             fireball_timer += delta_time;
-            if (fireball_level > 0 && fireball_timer >= fireball_cooldown && !enemies.empty()) {
+            if (fireball_level > 0 && fireball_timer >= fireball_cooldown) {
                 fireball_timer = 0.0f;
                 int projectile_count = 1 + (fireball_level - 1) / 2;
                 for (int p = 0; p < projectile_count; ++p) {
-                    size_t target_index = static_cast<size_t>(
-                        std::floor(unit_dist(rng) * enemies.size()));
-                    if (target_index >= enemies.size()) {
-                        target_index = enemies.size() - 1;
+                    glm::vec3 direction = player_aim_dir;
+                    if (!enemies.empty() && glm::length(direction) < 0.001f) {
+                        float best_dist = std::numeric_limits<float>::max();
+                        glm::vec3 best_dir(0.0f, 0.0f, -1.0f);
+                        for (const Enemy& enemy : enemies) {
+                            glm::vec3 to_enemy = enemy.position - player_position;
+                            to_enemy.y = 0.0f;
+                            float dist = glm::dot(to_enemy, to_enemy);
+                            if (dist < best_dist) {
+                                best_dist = dist;
+                                best_dir = to_enemy;
+                            }
+                        }
+                        direction = best_dir;
                     }
-                    glm::vec3 to_target = enemies[target_index].position - player_position;
-                    to_target.y = 0.0f;
-                    if (glm::length(to_target) < 0.001f) {
-                        to_target = glm::vec3(0.0f, 0.0f, -1.0f);
+                    if (glm::length(direction) < 0.001f) {
+                        direction = glm::vec3(0.0f, 0.0f, -1.0f);
                     }
-                    glm::vec3 direction = glm::normalize(to_target);
+                    direction = glm::normalize(direction);
                     projectiles.push_back(Projectile{
                         player_position + glm::vec3(0.0f, 0.6f, 0.0f),
                         direction * 7.0f,
                         3.0f,
                         fireball_damage});
+                }
+            }
+
+            bomb_timer += delta_time;
+            if (bomb_level > 0 && bomb_timer >= bomb_cooldown) {
+                bomb_timer = 0.0f;
+                glm::vec3 direction = player_aim_dir;
+                if (glm::length(direction) < 0.001f) {
+                    direction = glm::vec3(0.0f, 0.0f, -1.0f);
+                }
+                direction = glm::normalize(direction);
+                bombs.push_back(Bomb{
+                    player_position + glm::vec3(0.0f, 0.6f, 0.0f),
+                    direction * 5.0f,
+                    0.8f});
+            }
+
+            for (size_t i = 0; i < bombs.size();) {
+                bombs[i].position += bombs[i].velocity * delta_time;
+                bombs[i].timer -= delta_time;
+                if (bombs[i].timer <= 0.0f) {
+                    explosions.push_back(Explosion{
+                        bombs[i].position,
+                        0.0f,
+                        0.5f,
+                        bomb_radius});
+                    for (Enemy& enemy : enemies) {
+                        glm::vec3 delta = enemy.position - bombs[i].position;
+                        delta.y = 0.0f;
+                        if (glm::length(delta) <= bomb_radius) {
+                            enemy.health -= bomb_damage;
+                        }
+                    }
+                    bombs[i] = bombs.back();
+                    bombs.pop_back();
+                } else {
+                    ++i;
                 }
             }
 
@@ -1266,7 +1685,7 @@ int main() {
                 }
             }
             player_damage_timer += delta_time;
-            if (player_contact && player_damage_timer >= player_damage_interval) {
+            if (jump_timer <= 0.0f && player_contact && player_damage_timer >= player_damage_interval) {
                 player_damage_timer = 0.0f;
                 player_health -= glm::max(1, contact_damage);
             }
@@ -1275,7 +1694,7 @@ int main() {
                 if (enemies[i].health <= 0) {
                     gems.push_back(ExperienceGem{enemies[i].position});
                     enemies_killed += 1;
-                    coins_earned += 1;
+                    coins_earned += enemies[i].elite ? 3 : 1;
                     float drop_roll = unit_dist(rng);
                     if (drop_roll < 0.08f) {
                         pickups.push_back(Pickup{enemies[i].position, PickupType::Coin});
@@ -1323,10 +1742,21 @@ int main() {
                             for (Enemy& enemy : enemies) {
                                 enemy.health = 0;
                             }
+                            nuke_flash_timer = 0.45f;
                             break;
                     }
                     pickups[i] = pickups.back();
                     pickups.pop_back();
+                } else {
+                    ++i;
+                }
+            }
+
+            for (size_t i = 0; i < explosions.size();) {
+                explosions[i].timer += delta_time;
+                if (explosions[i].timer >= explosions[i].duration) {
+                    explosions[i] = explosions.back();
+                    explosions.pop_back();
                 } else {
                     ++i;
                 }
@@ -1346,6 +1776,11 @@ int main() {
                     pool.push_back(ItemChoice{ItemId::Fireball, "Fireball", 80});
                 } else if (fireball_level < 5) {
                     pool.push_back(ItemChoice{ItemId::FireballUpgrade, "Fireball +", 60});
+                }
+                if (bomb_level == 0) {
+                    pool.push_back(ItemChoice{ItemId::Bomb, "Bomb", 70});
+                } else if (bomb_level < 5) {
+                    pool.push_back(ItemChoice{ItemId::BombUpgrade, "Bomb +", 50});
                 }
                 if (player_max_health < 40) {
                     pool.push_back(ItemChoice{ItemId::MaxHealth, "Max Health +20%", 80});
@@ -1403,19 +1838,117 @@ int main() {
             glm::radians(60.0f),
             static_cast<float>(window_width) / static_cast<float>(window_height),
             0.1f,
-            100.0f);
+            140.0f);
+        float jump_view_phase = jump_timer > 0.0f ? (jump_duration - jump_timer) / jump_duration : 0.0f;
+        float jump_view_offset = jump_timer > 0.0f ? std::sin(jump_view_phase * glm::pi<float>()) * jump_height : 0.0f;
+        glm::vec3 cam_dir(
+            std::cos(camera_pitch) * std::cos(camera_yaw),
+            std::sin(camera_pitch),
+            std::cos(camera_pitch) * std::sin(camera_yaw));
+        glm::vec3 camera_pos = player_position - cam_dir * camera_distance;
+        float min_cam_y = TerrainHeight(camera_pos.x, camera_pos.z) + 1.0f;
+        if (camera_pos.y < min_cam_y) {
+            camera_pos.y = min_cam_y;
+        }
         glm::mat4 view = glm::lookAt(
-            player_position + camera_offset,
-            player_position,
+            camera_pos,
+            player_position + glm::vec3(0.0f, jump_view_offset, 0.0f),
             glm::vec3(0.0f, 1.0f, 0.0f));
+
+        // Update ground colors based on nearby entities.
+        for (size_t i = 0; i < ground_tile_centers.size(); ++i) {
+            glm::vec2 center = ground_tile_centers[i];
+            float player_dist = glm::length(center - glm::vec2(player_position.x, player_position.z));
+            float player_glow = std::exp(-(player_dist * player_dist) / 120.0f);
+            float enemy_glow = 0.0f;
+            for (const Enemy& enemy : enemies) {
+                glm::vec2 epos(enemy.position.x, enemy.position.z);
+                float dist = glm::length(center - epos);
+                if (dist < 4.0f) {
+                    enemy_glow = glm::max(enemy_glow, 1.0f - dist / 4.0f);
+                }
+            }
+            float pulse = 0.6f + 0.4f * std::sin(run_time * 1.5f + (center.x + center.y) * 0.2f);
+            glm::vec3 base(0.12f, 0.16f, 0.12f);
+            glm::vec3 glow_color = base
+                + glm::vec3(0.08f, 0.20f, 0.10f) * player_glow
+                + glm::vec3(0.35f, 0.12f, 0.10f) * enemy_glow * pulse;
+
+            size_t vertex_index = i * 6 * 6;
+            for (int v = 0; v < 6; ++v) {
+                ground_vertices[vertex_index + v * 6 + 3] = glow_color.r;
+                ground_vertices[vertex_index + v * 6 + 4] = glow_color.g;
+                ground_vertices[vertex_index + v * 6 + 5] = glow_color.b;
+            }
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, ground_vbo);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, ground_vertices.size() * sizeof(float),
+                        ground_vertices.data());
 
         glm::mat4 ground_model(1.0f);
         glm::mat4 ground_mvp = projection * view * ground_model;
         glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(ground_mvp));
-        glUniform3f(color_location, 0.12f, 0.16f, 0.18f);
+        glUniform1i(use_vertex_color_location, 1);
         glBindVertexArray(ground_vao);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(ground_vertices.size() / 6));
         glBindVertexArray(0);
+        glUniform1i(use_vertex_color_location, 0);
+
+        // Wireframe overlay for distinct triangles.
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        glLineWidth(1.0f);
+        glUniform3f(color_location, 0.10f, 0.35f, 0.18f);
+        glUniform1i(use_vertex_color_location, 0);
+        glBindVertexArray(ground_vao);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(ground_vertices.size() / 6));
+        glBindVertexArray(0);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        glDisable(GL_BLEND);
+
+        // City blocks (wireframe skyline so enemies remain visible)
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        glLineWidth(1.5f);
+        const int city_half = 4;
+        const float block_size = 5.0f;
+        for (int x = -city_half; x <= city_half; ++x) {
+            for (int z = -city_half; z <= city_half; ++z) {
+                if ((x + z) % 2 != 0) {
+                    continue;
+                }
+                if (x == 0 && z == 0) {
+                    continue;
+                }
+                float wx = static_cast<float>(x) * block_size;
+                float wz = static_cast<float>(z) * block_size;
+                int tx = static_cast<int>(std::floor((wx + (kGridW * kTileSize) * 0.5f) / block_size));
+                int tz = static_cast<int>(std::floor((wz + (kGridH * kTileSize) * 0.5f) / block_size));
+                int ramp_type = RampDirAt(tx, tz);
+                int tile_height = TileLevel(tx, tz);
+                if (ramp_type != 0 || tile_height < 1) {
+                    continue;
+                }
+                float height = 1.5f + 0.6f * static_cast<float>((x * x + z * z) % 6);
+                float base_height = TerrainHeight(wx, wz);
+                glm::vec3 base(static_cast<float>(x) * block_size,
+                               base_height + height * 0.5f,
+                               static_cast<float>(z) * block_size);
+                glm::mat4 block = glm::translate(glm::mat4(1.0f), base);
+                block = glm::scale(block, glm::vec3(block_half * 2.0f, height, block_half * 2.0f));
+                glm::mat4 block_mvp = projection * view * block;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(block_mvp));
+                float glow = 0.55f + 0.45f * std::sin(run_time * 1.5f + (x + z) * 0.6f);
+                glUniform3f(color_location, 0.25f * glow, 0.75f * glow, 0.95f * glow);
+                glBindVertexArray(cube_vao);
+                glDrawArrays(GL_TRIANGLES, 0, 36);
+                glBindVertexArray(0);
+            }
+        }
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        glDisable(GL_BLEND);
 
         if (state == GameState::Running && garlic_level > 0) {
             glDisable(GL_DEPTH_TEST);
@@ -1431,6 +1964,7 @@ int main() {
             glUniform3f(ring_color_location, 0.30f, 0.95f, 0.40f);
             float phase = attack_interval > 0.0f ? glm::clamp(attack_timer / attack_interval, 0.0f, 1.0f) : 0.0f;
             glUniform1f(ring_phase_location, phase);
+            glUniform1f(ring_alpha_location, 1.0f);
             glBindVertexArray(ring_vao);
             glDrawArrays(GL_TRIANGLES, 0, 6);
             glBindVertexArray(0);
@@ -1439,24 +1973,47 @@ int main() {
             glEnable(GL_DEPTH_TEST);
         }
 
-        glm::mat4 player_model = glm::translate(
-            glm::mat4(1.0f),
-            player_position + glm::vec3(0.0f, 0.5f, 0.0f));
-        glm::mat4 player_mvp = projection * view * player_model;
-        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(player_mvp));
-        if (skin_selected) {
-            glUniform3f(color_location, 0.35f, 0.20f, 0.85f);
-        } else {
-            glUniform3f(color_location, 0.92f, 0.16f, 0.20f);
-        }
-        glBindVertexArray(cube_vao);
-        glDrawArrays(GL_TRIANGLES, 0, 36);
+        glm::vec3 player_color = skin_selected
+            ? glm::vec3(0.35f, 0.20f, 0.85f)
+            : glm::vec3(0.95f, 0.55f, 0.10f);
+        glUniform3f(color_location, player_color.r, player_color.g, player_color.b);
+
+        float jump_phase = jump_timer > 0.0f ? (jump_duration - jump_timer) / jump_duration : 0.0f;
+        float jump_offset = jump_timer > 0.0f ? std::sin(jump_phase * glm::pi<float>()) * jump_height : 0.0f;
+        glm::vec3 base_pos = player_position + glm::vec3(0.0f, 0.35f + jump_offset, 0.0f);
+        glm::mat4 body = glm::translate(glm::mat4(1.0f), base_pos);
+        body = glm::scale(body, glm::vec3(0.9f, 0.6f, 1.1f));
+        glm::mat4 body_mvp = projection * view * body;
+        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(body_mvp));
+        glBindVertexArray(cylinder_mesh.vao);
+        glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
+        glBindVertexArray(0);
+
+        glm::mat4 head = glm::translate(glm::mat4(1.0f), base_pos + glm::vec3(0.0f, 0.35f, 0.0f));
+        head = glm::scale(head, glm::vec3(0.45f));
+        glm::mat4 head_mvp = projection * view * head;
+        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(head_mvp));
+        glBindVertexArray(sphere_mesh.vao);
+        glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
+        glBindVertexArray(0);
+
+        glm::mat4 tail = glm::translate(glm::mat4(1.0f), base_pos + glm::vec3(0.0f, -0.35f, 0.0f));
+        tail = glm::scale(tail, glm::vec3(0.35f));
+        glm::mat4 tail_mvp = projection * view * tail;
+        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(tail_mvp));
+        glBindVertexArray(sphere_mesh.vao);
+        glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
         glBindVertexArray(0);
 
         for (const Enemy& enemy : enemies) {
             float bob = 0.08f * std::sin(run_time * 3.5f + enemy.phase);
             glm::vec3 base_pos = enemy.position + glm::vec3(0.0f, 0.35f + bob, 0.0f);
-            glUniform3f(color_location, enemy.color.r, enemy.color.g, enemy.color.b);
+            if (enemy.elite) {
+                float glow = 0.65f + 0.35f * std::sin(run_time * 5.0f + enemy.phase);
+                glUniform3f(color_location, enemy.color.r * glow, enemy.color.g * glow, enemy.color.b * glow);
+            } else {
+                glUniform3f(color_location, enemy.color.r, enemy.color.g, enemy.color.b);
+            }
 
             if (enemy.type == 0) {
                 glm::mat4 body = glm::translate(glm::mat4(1.0f), base_pos);
@@ -1537,6 +2094,22 @@ int main() {
             glBindVertexArray(0);
         }
 
+        for (const Bomb& bomb : bombs) {
+            glm::mat4 bomb_model = glm::translate(
+                glm::mat4(1.0f),
+                bomb.position);
+            bomb_model = glm::scale(bomb_model, glm::vec3(0.25f));
+            glm::mat4 bomb_mvp = projection * view * bomb_model;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(bomb_mvp));
+            glUniform3f(color_location, 0.35f, 0.10f, 0.08f);
+            glBindVertexArray(sphere_mesh.vao);
+            glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
+            glBindVertexArray(0);
+        }
+
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         for (const Pickup& pickup : pickups) {
             glm::vec3 color(0.85f, 0.85f, 0.2f);
             float scale = 0.35f;
@@ -1614,6 +2187,33 @@ int main() {
                 glBindVertexArray(0);
             }
         }
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
+
+        if (!explosions.empty()) {
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(ring_program);
+            for (const Explosion& explosion : explosions) {
+                float t = explosion.timer / glm::max(0.001f, explosion.duration);
+                glm::mat4 ring_model = glm::translate(
+                    glm::mat4(1.0f),
+                    explosion.position + glm::vec3(0.0f, 0.05f, 0.0f));
+                ring_model = glm::scale(ring_model, glm::vec3(explosion.radius, 1.0f, explosion.radius));
+                glm::mat4 ring_mvp = projection * view * ring_model;
+                glUniformMatrix4fv(ring_mvp_location, 1, GL_FALSE, glm::value_ptr(ring_mvp));
+                glUniform3f(ring_color_location, 0.95f, 0.25f, 0.20f);
+                glUniform1f(ring_phase_location, 1.0f);
+                glUniform1f(ring_alpha_location, 1.0f - t);
+                glBindVertexArray(ring_vao);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+                glBindVertexArray(0);
+            }
+            glUseProgram(program);
+            glDisable(GL_BLEND);
+            glEnable(GL_DEPTH_TEST);
+        }
 
         for (const Projectile& projectile : projectiles) {
             glm::mat4 proj_model = glm::translate(
@@ -1681,6 +2281,31 @@ int main() {
                                  glm::vec3(0.95f, 0.55f, 0.10f), ui_projection);
                 }
             }
+            if (bomb_level > 0) {
+                for (int i = 0; i < bomb_level; ++i) {
+                    draw_ui_quad(icon_x - i * (icon_size + 4.0f),
+                                 icon_y - (icon_size + 6.0f) * 2.0f,
+                                 icon_size, icon_size,
+                                 glm::vec3(0.85f, 0.25f, 0.20f), ui_projection);
+                }
+            }
+
+            if (freeze_timer > 0.0f) {
+                float freeze_ratio = glm::clamp(freeze_timer / 4.0f, 0.0f, 1.0f);
+                float freeze_y = window_height - margin - bar_height * 3.6f;
+                draw_ui_quad(margin, freeze_y, bar_width, bar_height * 0.6f,
+                             glm::vec3(0.08f, 0.12f, 0.18f), ui_projection);
+                draw_ui_quad(margin, freeze_y, bar_width * freeze_ratio, bar_height * 0.6f,
+                             glm::vec3(0.20f, 0.65f, 0.95f), ui_projection);
+            }
+        }
+
+        if (nuke_flash_timer > 0.0f) {
+            float alpha = glm::clamp(nuke_flash_timer / 0.45f, 0.0f, 1.0f) * 0.35f;
+            glUniform1f(alpha_location, alpha);
+            draw_ui_quad(0.0f, 0.0f, static_cast<float>(window_width),
+                         static_cast<float>(window_height), glm::vec3(0.85f, 0.20f, 0.15f), ui_projection);
+            glUniform1f(alpha_location, 1.0f);
         }
 
         if (state == GameState::MainMenu) {
@@ -1754,6 +2379,13 @@ int main() {
                                ui_projection);
             draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 156.0f, panel_w - 80.0f, 28.0f,
                                "Quit", main_menu_index == 2 ? ui_highlight_text : ui_dim, ui_projection);
+            draw_text_centered(panel_x, panel_y - 8.0f, panel_w, 20.0f,
+                               std::string("Start Weapon: ") +
+                                   (starter_weapon_index == 0 ? "Garlic" :
+                                        (starter_weapon_index == 1 ? "Fireball" : "Bomb")),
+                               ui_dim, ui_projection);
+            draw_text_centered(panel_x, panel_y - 28.0f, panel_w, 18.0f,
+                               "Use Left/Right to choose", ui_dim, ui_projection);
             draw_text_centered(panel_x, panel_y - 32.0f, panel_w, 24.0f,
                                "Coins: " + std::to_string(coins), ui_white, ui_projection);
         } else if (state == GameState::PowerUps) {
