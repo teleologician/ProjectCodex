@@ -40,6 +40,40 @@ struct Plateau {
 static std::vector<Plateau> g_plateaus;
 static std::vector<RampTile> g_ramps;
 
+enum class StarterWeaponId {
+    Garlic,
+    HolyBomb,
+    Cross,
+    Stake,
+    Crossbow,
+    Caltrops
+};
+
+struct StarterWeaponOption {
+    StarterWeaponId id;
+    const char* name;
+};
+
+std::vector<StarterWeaponOption> BuildStarterWeapons(bool unlock_cross, bool unlock_stick,
+                                                     bool unlock_crossbow, bool unlock_poison) {
+    std::vector<StarterWeaponOption> options;
+    options.push_back({StarterWeaponId::Garlic, "Garlic"});
+    options.push_back({StarterWeaponId::HolyBomb, "Holy Bomb"});
+    if (unlock_cross) {
+        options.push_back({StarterWeaponId::Cross, "Cross"});
+    }
+    if (unlock_stick) {
+        options.push_back({StarterWeaponId::Stake, "Stake"});
+    }
+    if (unlock_crossbow) {
+        options.push_back({StarterWeaponId::Crossbow, "Crossbow"});
+    }
+    if (unlock_poison) {
+        options.push_back({StarterWeaponId::Caltrops, "Caltrops"});
+    }
+    return options;
+}
+
 GLuint CompileShader(GLenum type, const char* source) {
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, nullptr);
@@ -1393,6 +1427,7 @@ struct Obstacle {
     int coins_earned = 0;
 
     glm::vec3 player_position(0.0f, 0.0f, 0.0f);
+    glm::vec3 player_velocity(0.0f, 0.0f, 0.0f);
     int player_level = 1;
     int player_xp = 0;
     int player_health = 10;
@@ -1449,6 +1484,7 @@ struct Obstacle {
     int crossbow_damage = 2;
     int stick_level = 0;
     float stick_timer = 0.0f;
+    float stick_flash_timer = 0.0f;
     float stick_cooldown = 0.9f;
     float stick_range = 1.8f;
     int stick_damage = 2;
@@ -1849,6 +1885,17 @@ struct Obstacle {
         SaveProgress(save_path, save_data);
     };
 
+    auto build_starter_weapons = [&]() {
+        auto options = BuildStarterWeapons(unlock_cross, unlock_stick, unlock_crossbow, unlock_poison);
+        if (options.empty()) {
+            options.push_back({StarterWeaponId::Garlic, "Garlic"});
+        }
+        if (starter_weapon_index >= static_cast<int>(options.size())) {
+            starter_weapon_index = 0;
+        }
+        return options;
+    };
+
     auto start_run = [&]() {
         if (terrain_dirty) {
             GenerateTerrain(terrain_seed);
@@ -1871,6 +1918,7 @@ struct Obstacle {
 
         player_position = glm::vec3(0.0f, 0.0f, 0.0f);
         player_position.y = TerrainHeightAt(player_position.x, player_position.z, player_position.y);
+        player_velocity = glm::vec3(0.0f);
         player_level = 1;
         player_xp = 0;
         player_max_health = 10 + meta_max_health_level;
@@ -1883,21 +1931,25 @@ struct Obstacle {
         pickup_magnet_radius = 1.2f * std::pow(1.15f,
             static_cast<float>(meta_magnet_level + magnet_level));
 
-        garlic_level = starter_weapon_index == 0 ? 1 : 0;
-        fireball_level = starter_weapon_index == 1 ? 1 : 0;
+        auto starters = build_starter_weapons();
+        StarterWeaponId starter_id = starters[starter_weapon_index].id;
+
+        garlic_level = starter_id == StarterWeaponId::Garlic ? 1 : 0;
+        fireball_level = 0;
         fireball_timer = 0.0f;
         fireball_cooldown = 1.5f;
         fireball_damage = 2 + meta_damage_level;
-        crossbow_level = 0;
+        crossbow_level = starter_id == StarterWeaponId::Crossbow ? 1 : 0;
         crossbow_timer = 0.0f;
         crossbow_cooldown = 1.2f;
         crossbow_damage = 2 + meta_damage_level;
-        stick_level = 0;
+        stick_level = starter_id == StarterWeaponId::Stake ? 1 : 0;
         stick_timer = 0.0f;
+        stick_flash_timer = 0.0f;
         stick_cooldown = 0.9f;
         stick_range = 1.8f;
         stick_damage = 2 + meta_damage_level;
-        cross_level = 0;
+        cross_level = starter_id == StarterWeaponId::Cross ? 1 : 0;
         cross_timer = 0.0f;
         cross_tick = 0.45f;
         cross_orbit_radius = 1.6f;
@@ -1908,12 +1960,12 @@ struct Obstacle {
         holywater_cooldown = 2.4f;
         holywater_radius = 2.0f;
         holywater_damage = 1 + meta_damage_level / 2;
-        poison_level = 0;
+        poison_level = starter_id == StarterWeaponId::Caltrops ? 1 : 0;
         poison_timer = 0.0f;
         poison_cooldown = 3.0f;
         poison_radius = 2.4f;
         poison_damage = 1 + meta_damage_level / 2;
-        bomb_level = starter_weapon_index == 2 ? 1 : 0;
+        bomb_level = starter_id == StarterWeaponId::HolyBomb ? 1 : 0;
         bomb_timer = 0.0f;
         bomb_cooldown = 2.5f;
         bomb_radius = 2.8f;
@@ -2105,9 +2157,13 @@ struct Obstacle {
                     } else if (key == SDLK_DOWN || key == SDLK_s) {
                         main_menu_index = (main_menu_index + 1) % 3;
                     } else if (key == SDLK_LEFT || key == SDLK_a) {
-                        starter_weapon_index = (starter_weapon_index + 2) % 3;
+                        auto starters = build_starter_weapons();
+                        int count = static_cast<int>(starters.size());
+                        starter_weapon_index = (starter_weapon_index + count - 1) % count;
                     } else if (key == SDLK_RIGHT || key == SDLK_d) {
-                        starter_weapon_index = (starter_weapon_index + 1) % 3;
+                        auto starters = build_starter_weapons();
+                        int count = static_cast<int>(starters.size());
+                        starter_weapon_index = (starter_weapon_index + 1) % count;
                     } else if (key == SDLK_r) {
                         terrain_seed = static_cast<uint32_t>(rng());
                         GenerateTerrain(terrain_seed);
@@ -2128,7 +2184,7 @@ struct Obstacle {
                         }
                     }
                 } else if (state == GameState::PowerUps) {
-                    int option_count = 12;
+                    int option_count = 11;
                     if (key == SDLK_UP || key == SDLK_w) {
                         powerup_menu_index = (powerup_menu_index + option_count - 1) % option_count;
                     } else if (key == SDLK_DOWN || key == SDLK_s) {
@@ -2194,27 +2250,20 @@ struct Obstacle {
                                 save_progress();
                             }
                         } else if (index == 8) {
-                            int cost = 80;
-                            if (!unlock_holywater && coins >= cost) {
-                                coins -= cost;
-                                unlock_holywater = true;
-                                save_progress();
-                            }
-                        } else if (index == 9) {
                             int cost = 90;
                             if (!unlock_poison && coins >= cost) {
                                 coins -= cost;
                                 unlock_poison = true;
                                 save_progress();
                             }
-                        } else if (index == 10) {
+                        } else if (index == 9) {
                             int cost = 50;
                             if (!unlock_bat && coins >= cost) {
                                 coins -= cost;
                                 unlock_bat = true;
                                 save_progress();
                             }
-                        } else if (index == 11) {
+                        } else if (index == 10) {
                             if (!skin_unlocked) {
                                 int cost = 60;
                                 if (coins >= cost) {
@@ -2408,8 +2457,8 @@ struct Obstacle {
             glm::vec3 move = input.x * right + input.z * forward;
             if (glm::length(move) > 0.0f) {
                 move = glm::normalize(move);
-                player_aim_dir = forward;
             }
+            player_aim_dir = forward;
             if (jump_cooldown_timer > 0.0f) {
                 jump_cooldown_timer = glm::max(0.0f, jump_cooldown_timer - delta_time);
             }
@@ -2418,6 +2467,7 @@ struct Obstacle {
                 jump_timer = jump_duration;
                 jump_cooldown_timer = jump_cooldown;
             }
+            glm::vec3 prev_player_position = player_position;
             glm::vec3 desired = player_position + move * player_speed * delta_time;
             desired.x = glm::clamp(desired.x, -play_area_extent, play_area_extent);
             desired.z = glm::clamp(desired.z, -play_area_extent, play_area_extent);
@@ -2523,6 +2573,11 @@ struct Obstacle {
                 }
                 float target_y = TerrainHeightAt(player_position.x, player_position.z, player_position.y);
                 player_position.y = glm::mix(player_position.y, target_y, 0.35f);
+                if (delta_time > 0.0f) {
+                    player_velocity = (player_position - prev_player_position) / delta_time;
+                } else {
+                    player_velocity = glm::vec3(0.0f);
+                }
 
             float spawn_interval = glm::max(0.5f, base_spawn_interval - player_level * 0.05f);
             spawn_interval = glm::max(0.35f, spawn_interval - run_time * 0.01f);
@@ -2927,6 +2982,9 @@ struct Obstacle {
             if (nuke_flash_timer > 0.0f) {
                 nuke_flash_timer = glm::max(0.0f, nuke_flash_timer - delta_time);
             }
+            if (stick_flash_timer > 0.0f) {
+                stick_flash_timer = glm::max(0.0f, stick_flash_timer - delta_time);
+            }
 
             if (garlic_level > 0) {
                 attack_timer += delta_time;
@@ -3033,15 +3091,18 @@ struct Obstacle {
                     direction = glm::vec3(0.0f, 0.0f, -1.0f);
                 }
                 direction = glm::normalize(direction);
+                glm::vec3 carry = glm::vec3(player_velocity.x, 0.0f, player_velocity.z);
+                glm::vec3 launch_velocity = direction * 5.0f + carry * 0.75f;
                 bombs.push_back(Bomb{
                     player_position + glm::vec3(0.0f, 0.6f, 0.0f),
-                    direction * 5.0f,
+                    launch_velocity,
                     0.8f});
             }
 
             stick_timer += delta_time;
             if (stick_level > 0 && stick_timer >= stick_cooldown) {
                 stick_timer = 0.0f;
+                stick_flash_timer = 0.12f;
                 glm::vec3 forward = player_aim_dir;
                 forward.y = 0.0f;
                 if (glm::length(forward) < 0.001f) {
@@ -3051,8 +3112,10 @@ struct Obstacle {
                 float cos_half = std::cos(glm::radians(35.0f));
                 for (Enemy& enemy : enemies) {
                     glm::vec3 delta = enemy.position - player_position;
-                    float dist = glm::length(delta);
-                    if (dist <= stick_range) {
+                    float dy = std::abs(delta.y);
+                    glm::vec2 flat(delta.x, delta.z);
+                    float dist = glm::length(flat);
+                    if (dist <= stick_range && dy <= 1.2f) {
                         glm::vec3 dir = glm::normalize(glm::vec3(delta.x, 0.0f, delta.z));
                         if (glm::dot(dir, forward) >= cos_half) {
                             enemy.health -= stick_damage;
@@ -3104,6 +3167,8 @@ struct Obstacle {
                         0.0f,
                         0.5f,
                         bomb_radius});
+                    ground_effects.push_back(GroundEffect{bombs[i].position, bomb_radius, 0.0f, 1.6f, 0.0f, 0.35f,
+                                                          std::max(1, bomb_damage / 2), GroundEffectType::Holy});
                     for (Enemy& enemy : enemies) {
                         glm::vec3 delta = enemy.position - bombs[i].position;
                         delta.y = 0.0f;
@@ -3330,18 +3395,11 @@ struct Obstacle {
                         pool.push_back(ItemChoice{ItemId::CrossbowUpgrade, "Crossbow +", 60});
                     }
                 }
-                if (unlock_holywater) {
-                    if (holywater_level == 0) {
-                        pool.push_back(ItemChoice{ItemId::HolyWater, "Holy Water", 70});
-                    } else if (holywater_level < 5) {
-                        pool.push_back(ItemChoice{ItemId::HolyWaterUpgrade, "Holy Water +", 55});
-                    }
-                }
                 if (unlock_poison) {
                     if (poison_level == 0) {
-                        pool.push_back(ItemChoice{ItemId::PoisonBomb, "Poison Bomb", 65});
+                        pool.push_back(ItemChoice{ItemId::PoisonBomb, "Caltrops", 65});
                     } else if (poison_level < 5) {
-                        pool.push_back(ItemChoice{ItemId::PoisonBombUpgrade, "Poison Bomb +", 50});
+                        pool.push_back(ItemChoice{ItemId::PoisonBombUpgrade, "Caltrops +", 50});
                     }
                 }
                 if (fireball_level == 0) {
@@ -3350,9 +3408,9 @@ struct Obstacle {
                     pool.push_back(ItemChoice{ItemId::FireballUpgrade, "Fireball +", 60});
                 }
                 if (bomb_level == 0) {
-                    pool.push_back(ItemChoice{ItemId::Bomb, "Bomb", 70});
+                    pool.push_back(ItemChoice{ItemId::Bomb, "Holy Bomb", 70});
                 } else if (bomb_level < 5) {
-                    pool.push_back(ItemChoice{ItemId::BombUpgrade, "Bomb +", 50});
+                    pool.push_back(ItemChoice{ItemId::BombUpgrade, "Holy Bomb +", 50});
                 }
                 if (player_max_health < 40) {
                     pool.push_back(ItemChoice{ItemId::MaxHealth, "Max Health +20%", 80});
@@ -3589,7 +3647,10 @@ struct Obstacle {
         float jump_phase = jump_timer > 0.0f ? (jump_duration - jump_timer) / jump_duration : 0.0f;
         float jump_offset = jump_timer > 0.0f ? std::sin(jump_phase * glm::pi<float>()) * jump_height : 0.0f;
         glm::vec3 base_pos = player_position + glm::vec3(0.0f, 0.35f + jump_offset, 0.0f);
-        glm::mat4 body = glm::translate(glm::mat4(1.0f), base_pos);
+        float player_yaw = camera_yaw;
+        glm::mat4 base_transform = glm::translate(glm::mat4(1.0f), base_pos);
+        base_transform = glm::rotate(base_transform, player_yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::mat4 body = base_transform;
         body = glm::scale(body, glm::vec3(0.9f, 0.6f, 1.1f));
         glm::mat4 body_mvp = projection * view * body;
         glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(body_mvp));
@@ -3597,7 +3658,7 @@ struct Obstacle {
         glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
         glBindVertexArray(0);
 
-        glm::mat4 head = glm::translate(glm::mat4(1.0f), base_pos + glm::vec3(0.0f, 0.35f, 0.0f));
+        glm::mat4 head = base_transform * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.35f, 0.0f));
         head = glm::scale(head, glm::vec3(0.45f));
         glm::mat4 head_mvp = projection * view * head;
         glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(head_mvp));
@@ -3605,13 +3666,57 @@ struct Obstacle {
         glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
         glBindVertexArray(0);
 
-        glm::mat4 tail = glm::translate(glm::mat4(1.0f), base_pos + glm::vec3(0.0f, -0.35f, 0.0f));
+        glm::mat4 tail = base_transform * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -0.35f, 0.0f));
         tail = glm::scale(tail, glm::vec3(0.35f));
         glm::mat4 tail_mvp = projection * view * tail;
         glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(tail_mvp));
         glBindVertexArray(sphere_mesh.vao);
         glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
         glBindVertexArray(0);
+
+        glm::vec3 aim_dir = glm::normalize(glm::vec3(std::cos(player_yaw), 0.0f, std::sin(player_yaw)));
+        glm::vec3 right_dir = glm::normalize(glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), aim_dir));
+
+        if (crossbow_level > 0) {
+            glm::mat4 bow_model = base_transform * glm::translate(glm::mat4(1.0f),
+                                                                 glm::vec3(-0.35f, 0.12f, 0.0f));
+            bow_model = glm::scale(bow_model, glm::vec3(0.55f, 0.18f, 0.18f));
+            glm::mat4 bow_mvp = projection * view * bow_model;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(bow_mvp));
+            glUniform3f(color_location, 0.55f, 0.38f, 0.22f);
+            glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+        }
+
+        if (stick_level > 0) {
+            glm::mat4 stake_model = base_transform * glm::translate(glm::mat4(1.0f),
+                                                                   glm::vec3(0.35f, 0.12f, 0.0f));
+            stake_model = glm::scale(stake_model, glm::vec3(0.55f, 0.12f, 0.12f));
+            glm::mat4 stake_mvp = projection * view * stake_model;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(stake_mvp));
+            glUniform3f(color_location, 0.60f, 0.40f, 0.20f);
+            glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+        }
+
+        if (stick_flash_timer > 0.0f) {
+            float alpha = glm::clamp(stick_flash_timer / 0.12f, 0.0f, 1.0f);
+            glUniform1f(alpha_location, 0.85f * alpha);
+            glUniform3f(color_location, 0.95f, 0.90f, 0.35f);
+            glm::vec3 strike_pos = player_position + aim_dir * (stick_range * 0.55f);
+            strike_pos.y += 0.35f;
+            glm::mat4 strike_model = glm::translate(glm::mat4(1.0f), strike_pos);
+            strike_model = glm::rotate(strike_model, player_yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+            strike_model = glm::scale(strike_model, glm::vec3(stick_range, 0.08f, 0.12f));
+            glm::mat4 strike_mvp = projection * view * strike_model;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(strike_mvp));
+            glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+            glUniform1f(alpha_location, 1.0f);
+        }
 
         for (const Enemy& enemy : enemies) {
             float bob = 0.08f * std::sin(run_time * 3.5f + enemy.phase);
@@ -3744,7 +3849,7 @@ struct Obstacle {
             bomb_model = glm::scale(bomb_model, glm::vec3(0.25f));
             glm::mat4 bomb_mvp = projection * view * bomb_model;
             glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(bomb_mvp));
-            glUniform3f(color_location, 0.35f, 0.10f, 0.08f);
+            glUniform3f(color_location, 0.65f, 0.90f, 1.0f);
             glBindVertexArray(sphere_mesh.vao);
             glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
             glBindVertexArray(0);
@@ -3860,7 +3965,7 @@ struct Obstacle {
                                               glm::vec3(ring_scale * 1.35f, 1.0f, ring_scale * 1.35f));
                 glm::mat4 ring_mvp_outer = projection * view * ring_model_outer;
                 glUniformMatrix4fv(ring_mvp_location, 1, GL_FALSE, glm::value_ptr(ring_mvp_outer));
-                glUniform3f(ring_color_location, 0.95f, 0.55f, 0.15f);
+                glUniform3f(ring_color_location, 0.65f, 0.90f, 1.0f);
                 glUniform1f(ring_phase_location, glm::clamp(t * 1.2f, 0.0f, 1.0f));
                 glUniform1f(ring_alpha_location, 0.6f * (1.0f - t));
                 glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -3873,7 +3978,7 @@ struct Obstacle {
                 blast = glm::scale(blast, glm::vec3(explosion.radius * (0.35f + 0.9f * t)));
                 glm::mat4 blast_mvp = projection * view * blast;
                 glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(blast_mvp));
-                glUniform3f(color_location, 0.98f, 0.45f, 0.20f);
+                glUniform3f(color_location, 0.65f, 0.90f, 1.0f);
                 glBindVertexArray(sphere_mesh.vao);
                 glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
                 glBindVertexArray(0);
@@ -3892,22 +3997,38 @@ struct Obstacle {
             glUseProgram(ring_program);
             for (const GroundEffect& effect : ground_effects) {
                 float t = effect.timer / glm::max(0.001f, effect.duration);
-                glm::mat4 ring_model = glm::translate(
-                    glm::mat4(1.0f),
-                    effect.position + glm::vec3(0.0f, 0.04f, 0.0f));
-                ring_model = glm::scale(ring_model, glm::vec3(effect.radius, 1.0f, effect.radius));
-                glm::mat4 ring_mvp = projection * view * ring_model;
-                glUniformMatrix4fv(ring_mvp_location, 1, GL_FALSE, glm::value_ptr(ring_mvp));
                 if (effect.type == GroundEffectType::Holy) {
+                    glm::mat4 ring_model = glm::translate(
+                        glm::mat4(1.0f),
+                        effect.position + glm::vec3(0.0f, 0.04f, 0.0f));
+                    ring_model = glm::scale(ring_model, glm::vec3(effect.radius, 1.0f, effect.radius));
+                    glm::mat4 ring_mvp = projection * view * ring_model;
+                    glUniformMatrix4fv(ring_mvp_location, 1, GL_FALSE, glm::value_ptr(ring_mvp));
                     glUniform3f(ring_color_location, 0.65f, 0.90f, 1.0f);
+                    glUniform1f(ring_phase_location, glm::clamp(t, 0.0f, 1.0f));
+                    glUniform1f(ring_alpha_location, 0.7f * (1.0f - t * 0.5f));
+                    glBindVertexArray(ring_vao);
+                    glDrawArrays(GL_TRIANGLES, 0, 6);
+                    glBindVertexArray(0);
                 } else {
-                    glUniform3f(ring_color_location, 0.20f, 0.85f, 0.35f);
+                    glUseProgram(program);
+                    glUniform1f(alpha_location, 0.9f);
+                    glUniform3f(color_location, 0.20f, 0.85f, 0.35f);
+                    for (int i = 0; i < 6; ++i) {
+                        float angle = static_cast<float>(i) * glm::two_pi<float>() / 6.0f + t * 0.6f;
+                        float radius = effect.radius * 0.35f;
+                        glm::vec3 pos = effect.position +
+                            glm::vec3(std::cos(angle), 0.05f, std::sin(angle)) * radius;
+                        glm::mat4 spike = glm::translate(glm::mat4(1.0f), pos);
+                        spike = glm::scale(spike, glm::vec3(0.18f, 0.55f, 0.18f));
+                        glm::mat4 spike_mvp = projection * view * spike;
+                        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(spike_mvp));
+                        glBindVertexArray(cone_mesh.vao);
+                        glDrawArrays(GL_TRIANGLES, 0, cone_mesh.count);
+                    }
+                    glBindVertexArray(0);
+                    glUseProgram(ring_program);
                 }
-                glUniform1f(ring_phase_location, glm::clamp(t, 0.0f, 1.0f));
-                glUniform1f(ring_alpha_location, 0.7f * (1.0f - t * 0.5f));
-                glBindVertexArray(ring_vao);
-                glDrawArrays(GL_TRIANGLES, 0, 6);
-                glBindVertexArray(0);
             }
             glUseProgram(program);
             glDisable(GL_BLEND);
@@ -4085,7 +4206,7 @@ struct Obstacle {
             float panel_x = (window_width - panel_w) * 0.5f;
             float panel_y = (window_height - panel_h) * 0.5f;
             draw_ui_quad(panel_x, panel_y, panel_w, panel_h, glm::vec3(0.10f, 0.10f, 0.14f), ui_projection);
-            for (int i = 0; i < 12; ++i) {
+            for (int i = 0; i < 11; ++i) {
                 float y = panel_y + panel_h - 50.0f - i * 44.0f;
                 glm::vec3 color = (i == powerup_menu_index) ? glm::vec3(0.20f, 0.65f, 0.95f)
                                                             : glm::vec3(0.22f, 0.22f, 0.28f);
@@ -4128,6 +4249,8 @@ struct Obstacle {
             float panel_h = 220.0f;
             float panel_x = (window_width - panel_w) * 0.5f;
             float panel_y = (window_height - panel_h) * 0.5f;
+            auto starters = build_starter_weapons();
+            const char* starter_name = starters[starter_weapon_index].name;
             draw_text_centered(panel_x, panel_y + panel_h + 16.0f, panel_w, 32.0f, "Vampire Diary",
                                ui_white, ui_projection);
             draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 60.0f, panel_w - 80.0f, 28.0f,
@@ -4138,18 +4261,16 @@ struct Obstacle {
                                ui_projection);
             draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 156.0f, panel_w - 80.0f, 28.0f,
                                "Quit", main_menu_index == 2 ? ui_highlight_text : ui_dim, ui_projection);
-            draw_text_centered(panel_x, panel_y - 8.0f, panel_w, 20.0f,
-                               std::string("Start Weapon: ") +
-                                   (starter_weapon_index == 0 ? "Garlic" :
-                                        (starter_weapon_index == 1 ? "Fireball" : "Bomb")),
-                               ui_dim, ui_projection);
-            draw_text_centered(panel_x, panel_y - 28.0f, panel_w, 18.0f,
-                               "Use Left/Right to choose", ui_dim, ui_projection);
-            draw_text_centered(panel_x, panel_y - 32.0f, panel_w, 24.0f,
+            draw_text_centered(panel_x, panel_y - 96.0f, panel_w, 22.0f,
                                "Coins: " + std::to_string(coins), ui_white, ui_projection);
-            draw_text_centered(panel_x, panel_y - 54.0f, panel_w, 18.0f,
+            draw_text_centered(panel_x, panel_y - 72.0f, panel_w, 20.0f,
+                               std::string("Start Weapon: ") + starter_name,
+                               ui_dim, ui_projection);
+            draw_text_centered(panel_x, panel_y - 52.0f, panel_w, 18.0f,
+                               "Use Left/Right to choose", ui_dim, ui_projection);
+            draw_text_centered(panel_x, panel_y - 32.0f, panel_w, 18.0f,
                                "Seed: " + std::to_string(terrain_seed), ui_dim, ui_projection);
-            draw_text_centered(panel_x, panel_y - 72.0f, panel_w, 18.0f,
+            draw_text_centered(panel_x, panel_y - 14.0f, panel_w, 18.0f,
                                "Press R to reroll", ui_dim, ui_projection);
         } else if (state == GameState::PowerUps) {
             int cost_damage = 10 + 5 * meta_damage_level;
@@ -4160,7 +4281,6 @@ struct Obstacle {
             int cost_cross = 80;
             int cost_stick = 60;
             int cost_crossbow = 70;
-            int cost_holy = 80;
             int cost_poison = 90;
             int cost_bat = 50;
             float panel_w = 420.0f;
@@ -4200,22 +4320,19 @@ struct Obstacle {
                                unlock_crossbow ? "Crossbow (Unlocked)" : "Unlock Crossbow (Cost 70)",
                                powerup_menu_index == 7 ? ui_highlight_text : ui_dim, ui_projection);
             draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 410.0f, panel_w - 80.0f, 26.0f,
-                               unlock_holywater ? "Holy Water (Unlocked)" : "Unlock Holy Water (Cost 80)",
+                               unlock_poison ? "Caltrops (Unlocked)" : "Unlock Caltrops (Cost 90)",
                                powerup_menu_index == 8 ? ui_highlight_text : ui_dim, ui_projection);
             draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 454.0f, panel_w - 80.0f, 26.0f,
-                               unlock_poison ? "Poison Bomb (Unlocked)" : "Unlock Poison Bomb (Cost 90)",
-                               powerup_menu_index == 9 ? ui_highlight_text : ui_dim, ui_projection);
-            draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 498.0f, panel_w - 80.0f, 26.0f,
                                unlock_bat ? "Bat Pet (Unlocked)" : "Unlock Bat Pet (Cost 50)",
-                               powerup_menu_index == 10 ? ui_highlight_text : ui_dim, ui_projection);
+                               powerup_menu_index == 9 ? ui_highlight_text : ui_dim, ui_projection);
             if (!skin_unlocked) {
-                draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 542.0f, panel_w - 80.0f, 26.0f,
+                draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 498.0f, panel_w - 80.0f, 26.0f,
                                    "Unlock Skin (Cost 60)",
-                                   powerup_menu_index == 11 ? ui_highlight_text : ui_dim, ui_projection);
+                                   powerup_menu_index == 10 ? ui_highlight_text : ui_dim, ui_projection);
             } else {
-                draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 542.0f, panel_w - 80.0f, 26.0f,
+                draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 498.0f, panel_w - 80.0f, 26.0f,
                                    std::string("Toggle Skin (") + (skin_selected ? "On" : "Off") + ")",
-                                   powerup_menu_index == 11 ? ui_highlight_text : ui_dim, ui_projection);
+                                   powerup_menu_index == 10 ? ui_highlight_text : ui_dim, ui_projection);
             }
             draw_text_centered(panel_x, panel_y - 32.0f, panel_w, 24.0f,
                                "ESC to return", ui_dim, ui_projection);
@@ -4345,10 +4462,9 @@ struct Obstacle {
                     " | [6] Cross " + std::string(unlock_cross ? "(Unlocked)" : "(80)") +
                     " | [7] Stake " + std::string(unlock_stick ? "(Unlocked)" : "(60)") +
                     " | [8] Crossbow " + std::string(unlock_crossbow ? "(Unlocked)" : "(70)") +
-                    " | [9] Holy " + std::string(unlock_holywater ? "(Unlocked)" : "(80)") +
-                    " | [10] Poison " + std::string(unlock_poison ? "(Unlocked)" : "(90)") +
-                    " | [11] Bat " + std::string(unlock_bat ? "(Unlocked)" : "(50)") +
-                    " | [12] Skin";
+                    " | [9] Caltrops " + std::string(unlock_poison ? "(Unlocked)" : "(90)") +
+                    " | [10] Bat " + std::string(unlock_bat ? "(Unlocked)" : "(50)") +
+                    " | [11] Skin";
             if (!skin_unlocked) {
                 title += " (60)";
             }
