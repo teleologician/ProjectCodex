@@ -4,3 +4,4 @@ vcpkg/
 vcpkg_installed/
 .vs/
 save.txt
+build.zip
