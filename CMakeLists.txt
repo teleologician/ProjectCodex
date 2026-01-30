@@ -23,6 +23,7 @@ find_package(OpenGL REQUIRED)
 find_package(glad CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(SDL2 CONFIG REQUIRED)
+find_package(SDL2_ttf CONFIG REQUIRED)
 
 target_compile_definitions(vampire PRIVATE SDL_MAIN_HANDLED)
 target_link_libraries(vampire PRIVATE
@@ -30,5 +31,6 @@ target_link_libraries(vampire PRIVATE
     glm::glm
     SDL2::SDL2
     SDL2::SDL2main
+    SDL2_ttf::SDL2_ttf
     OpenGL::GL
 )
