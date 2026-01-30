@@ -2,7 +2,7 @@
 #include <iostream>
 
 #include <glad/glad.h>
-#include <GLFW/glfw3.h>
+#include <SDL2/SDL.h>
 
 namespace {
 GLuint CompileShader(GLenum type, const char* source) {
@@ -40,30 +40,46 @@ GLuint LinkProgram(GLuint vs, GLuint fs) {
 }  // namespace
 
 int main() {
-    if (!glfwInit()) {
-        std::cerr << "Failed to initialize GLFW." << std::endl;
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        std::cerr << "SDL_Init failed: " << SDL_GetError() << std::endl;
         return EXIT_FAILURE;
     }
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    GLFWwindow* window = glfwCreateWindow(800, 600, "Hello Triangle", nullptr, nullptr);
+    SDL_Window* window = SDL_CreateWindow(
+        "Hello Triangle",
+        SDL_WINDOWPOS_CENTERED,
+        SDL_WINDOWPOS_CENTERED,
+        800,
+        600,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!window) {
-        std::cerr << "Failed to create GLFW window." << std::endl;
-        glfwTerminate();
+        std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << std::endl;
+        SDL_Quit();
         return EXIT_FAILURE;
     }
 
-    glfwMakeContextCurrent(window);
+    SDL_GLContext gl_context = SDL_GL_CreateContext(window);
+    if (!gl_context) {
+        std::cerr << "SDL_GL_CreateContext failed: " << SDL_GetError() << std::endl;
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return EXIT_FAILURE;
+    }
 
-    if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress))) {
+    if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(SDL_GL_GetProcAddress))) {
         std::cerr << "Failed to initialize GLAD." << std::endl;
-        glfwDestroyWindow(window);
-        glfwTerminate();
+        SDL_GL_DeleteContext(gl_context);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
         return EXIT_FAILURE;
     }
+
+    glViewport(0, 0, 800, 600);
 
     const char* vertex_source =
         "#version 330 core\n"
@@ -76,14 +92,15 @@ int main() {
         "#version 330 core\n"
         "out vec4 FragColor;\n"
         "void main() {\n"
-        "    FragColor = vec4(0.95, 0.55, 0.15, 1.0);\n"
+        "    FragColor = vec4(0.92, 0.16, 0.20, 1.0);\n"
         "}\n";
 
     GLuint vs = CompileShader(GL_VERTEX_SHADER, vertex_source);
     GLuint fs = CompileShader(GL_FRAGMENT_SHADER, fragment_source);
     if (!vs || !fs) {
-        glfwDestroyWindow(window);
-        glfwTerminate();
+        SDL_GL_DeleteContext(gl_context);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
         return EXIT_FAILURE;
     }
 
@@ -91,8 +108,9 @@ int main() {
     glDeleteShader(vs);
     glDeleteShader(fs);
     if (!program) {
-        glfwDestroyWindow(window);
-        glfwTerminate();
+        SDL_GL_DeleteContext(gl_context);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
         return EXIT_FAILURE;
     }
 
@@ -114,8 +132,19 @@ int main() {
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 
-    while (!glfwWindowShouldClose(window)) {
-        glClearColor(0.08f, 0.10f, 0.14f, 1.0f);
+    bool running = true;
+    while (running) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) {
+                running = false;
+            } else if (event.type == SDL_WINDOWEVENT &&
+                       event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                glViewport(0, 0, event.window.data1, event.window.data2);
+            }
+        }
+
+        glClearColor(0.06f, 0.06f, 0.10f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         glUseProgram(program);
@@ -123,15 +152,15 @@ int main() {
         glDrawArrays(GL_TRIANGLES, 0, 3);
         glBindVertexArray(0);
 
-        glfwSwapBuffers(window);
-        glfwPollEvents();
+        SDL_GL_SwapWindow(window);
     }
 
     glDeleteVertexArrays(1, &vao);
     glDeleteBuffers(1, &vbo);
     glDeleteProgram(program);
 
-    glfwDestroyWindow(window);
-    glfwTerminate();
+    SDL_GL_DeleteContext(gl_context);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
     return EXIT_SUCCESS;
 }
