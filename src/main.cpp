@@ -386,6 +386,17 @@ bool IsNearRampEdge(const glm::vec2& p, float margin) {
     return false;
 }
 
+bool IsNearRampArea(const glm::vec2& p, float margin) {
+    for (const RampTile& ramp : g_ramps) {
+        glm::vec2 min = ramp.center - ramp.half - glm::vec2(margin, margin);
+        glm::vec2 max = ramp.center + ramp.half + glm::vec2(margin, margin);
+        if (p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y) {
+            return true;
+        }
+    }
+    return false;
+}
+
 float RampHeightAt(const RampTile& ramp, const glm::vec2& p) {
     glm::vec2 min = ramp.center - ramp.half;
     glm::vec2 max = ramp.center + ramp.half;
@@ -1047,6 +1058,48 @@ int main() {
         glm::vec3 position;
     };
 
+    enum class BuildingOwner {
+        Neutral,
+        Player,
+        Enemy
+    };
+
+    struct Building {
+        glm::vec2 center;
+        float size = 1.0f;
+        float height = 2.0f;
+        float base_height = 0.0f;
+        BuildingOwner owner = BuildingOwner::Neutral;
+        bool spawner = false;
+        int health = 10;
+        int max_health = 10;
+        float capture_timer = 0.0f;
+        float veteran_timer = 0.0f;
+        float spawn_timer = 0.0f;
+        float alive_timer = 0.0f;
+        bool destroyed = false;
+    };
+
+    enum class UnitState {
+        Home,
+        Follow,
+        Guard
+    };
+
+    struct Ally {
+        glm::vec3 position;
+        int health = 4;
+        int max_health = 4;
+        int id = 0;
+        int home_index = -1;
+        int guard_index = -1;
+        UnitState state = UnitState::Home;
+        float attack_timer = 0.0f;
+        float hurt_timer = 0.0f;
+        float respawn_timer = 0.0f;
+        bool alive = true;
+    };
+
     enum class PickupType {
         Coin,
         Health,
@@ -1064,6 +1117,8 @@ struct Obstacle {
     glm::vec2 max;
     bool is_ramp_wall = false;
     float height = 0.0f;
+    bool is_building = false;
+    BuildingOwner owner = BuildingOwner::Neutral;
 };
 
     struct Projectile {
@@ -1164,7 +1219,10 @@ struct Obstacle {
     std::vector<Bomb> bombs;
     std::vector<Explosion> explosions;
     std::vector<Pickup> pickups;
+    std::vector<Building> buildings;
+    std::vector<Ally> allies;
     std::vector<Obstacle> obstacles;
+    int ally_id_counter = 0;
     float spawn_timer = 0.0f;
     int early_spawn_index = 0;
     const float base_spawn_interval = 2.0f;
@@ -1195,6 +1253,8 @@ struct Obstacle {
     const float jump_duration = 0.35f;
     const float jump_cooldown = 0.8f;
     const float jump_height = 1.2f;
+    float enemy_spawner_timer = 0.0f;
+    const float enemy_spawner_interval = 35.0f;
 
     std::vector<ItemChoice> current_choices;
 
@@ -1202,8 +1262,8 @@ struct Obstacle {
     const float block_size = kTileSize;
     const float block_half = 1.1f;
     const float wall_thickness = 0.3f;
-    auto rebuild_obstacles = [&]() {
-        obstacles.clear();
+    auto rebuild_buildings = [&]() {
+        buildings.clear();
         for (int x = -city_half; x <= city_half; ++x) {
             for (int z = -city_half; z <= city_half; ++z) {
                 if ((x + z) % 2 != 0) {
@@ -1214,56 +1274,79 @@ struct Obstacle {
                 }
                 glm::vec2 center(static_cast<float>(x) * block_size,
                                  static_cast<float>(z) * block_size);
-                if (!IsOnPlateau(center) || IsOnRamp(center)) {
+                if (!IsOnPlateau(center) || IsOnRamp(center) || IsNearRampArea(center, block_half + 0.8f)) {
                     continue;
                 }
+                float height = 1.5f + 0.6f * static_cast<float>((x * x + z * z) % 6);
+                Building building;
+                building.center = center;
+                building.size = block_half * 2.0f;
+                building.height = height;
+                building.base_height = PlateauHeightAt(center);
+                building.owner = BuildingOwner::Neutral;
+                building.spawner = false;
+                building.max_health = 10;
+                building.health = building.max_health;
+                buildings.push_back(building);
+            }
+        }
+    };
+    auto rebuild_obstacles = [&]() {
+        obstacles.clear();
+        for (const Building& building : buildings) {
             Obstacle box;
-            box.min = center - glm::vec2(block_half, block_half);
-            box.max = center + glm::vec2(block_half, block_half);
+            box.min = building.center - glm::vec2(block_half, block_half);
+            box.max = building.center + glm::vec2(block_half, block_half);
             box.is_ramp_wall = false;
-            box.height = PlateauHeightAt(center);
+            box.height = building.base_height;
+            box.is_building = true;
+            box.owner = building.owner;
             obstacles.push_back(box);
         }
-    }
-    for (const RampTile& ramp : g_ramps) {
-        glm::vec2 min = ramp.center - ramp.half;
-        glm::vec2 max = ramp.center + ramp.half;
-        if (ramp.dir == 1 || ramp.dir == 2) {
-            Obstacle wall_a;
-            wall_a.min = glm::vec2(min.x, min.y - wall_thickness);
-            wall_a.max = glm::vec2(max.x, min.y + wall_thickness);
-            wall_a.is_ramp_wall = true;
-            wall_a.height = ramp.height;
-            obstacles.push_back(wall_a);
+        for (const RampTile& ramp : g_ramps) {
+            glm::vec2 min = ramp.center - ramp.half;
+            glm::vec2 max = ramp.center + ramp.half;
+            if (ramp.dir == 1 || ramp.dir == 2) {
+                Obstacle wall_a;
+                wall_a.min = glm::vec2(min.x, min.y - wall_thickness);
+                wall_a.max = glm::vec2(max.x, min.y + wall_thickness);
+                wall_a.is_ramp_wall = true;
+                wall_a.height = ramp.height;
+                wall_a.is_building = false;
+                obstacles.push_back(wall_a);
 
-            Obstacle wall_b;
-            wall_b.min = glm::vec2(min.x, max.y - wall_thickness);
-            wall_b.max = glm::vec2(max.x, max.y + wall_thickness);
-            wall_b.is_ramp_wall = true;
-            wall_b.height = ramp.height;
-            obstacles.push_back(wall_b);
-        } else {
-            Obstacle wall_a;
-            wall_a.min = glm::vec2(min.x - wall_thickness, min.y);
-            wall_a.max = glm::vec2(min.x + wall_thickness, max.y);
-            wall_a.is_ramp_wall = true;
-            wall_a.height = ramp.height;
-            obstacles.push_back(wall_a);
+                Obstacle wall_b;
+                wall_b.min = glm::vec2(min.x, max.y - wall_thickness);
+                wall_b.max = glm::vec2(max.x, max.y + wall_thickness);
+                wall_b.is_ramp_wall = true;
+                wall_b.height = ramp.height;
+                wall_b.is_building = false;
+                obstacles.push_back(wall_b);
+            } else {
+                Obstacle wall_a;
+                wall_a.min = glm::vec2(min.x - wall_thickness, min.y);
+                wall_a.max = glm::vec2(min.x + wall_thickness, max.y);
+                wall_a.is_ramp_wall = true;
+                wall_a.height = ramp.height;
+                wall_a.is_building = false;
+                obstacles.push_back(wall_a);
 
-            Obstacle wall_b;
-            wall_b.min = glm::vec2(max.x - wall_thickness, min.y);
-            wall_b.max = glm::vec2(max.x + wall_thickness, max.y);
-            wall_b.is_ramp_wall = true;
-            wall_b.height = ramp.height;
-            obstacles.push_back(wall_b);
+                Obstacle wall_b;
+                wall_b.min = glm::vec2(max.x - wall_thickness, min.y);
+                wall_b.max = glm::vec2(max.x + wall_thickness, max.y);
+                wall_b.is_ramp_wall = true;
+                wall_b.height = ramp.height;
+                wall_b.is_building = false;
+                obstacles.push_back(wall_b);
+            }
         }
-    }
     };
 
     terrain_seed = static_cast<uint32_t>(rng());
     GenerateTerrain(terrain_seed);
     rebuild_ground();
     rebuild_ramp_walls();
+    rebuild_buildings();
     rebuild_obstacles();
     terrain_dirty = false;
 
@@ -1356,6 +1439,169 @@ struct Obstacle {
         enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite});
     };
 
+    auto spawn_enemy_at = [&](const glm::vec3& origin, int health_mult, const glm::vec3& color_override, bool force_elite) {
+        glm::vec3 position = origin;
+        float minute = run_time / 60.0f;
+        int roll = static_cast<int>(unit_dist(rng) * 100.0f);
+        bool allow_fast = minute >= 1.0f;
+        bool allow_tank = minute >= 2.0f;
+        bool allow_plant = minute >= 3.0f;
+
+        int health = 3 + player_level / 3;
+        float speed = speed_dist(rng);
+        int damage = 1;
+        float scale = 0.7f;
+        glm::vec3 color(0.35f, 0.55f, 0.85f);
+        int type = 0;
+        bool elite = false;
+
+        if (run_time < 60.0f) {
+            int cycle = early_spawn_index % 4;
+            early_spawn_index += 1;
+            if (cycle == 0) {
+                // basic
+            } else if (cycle == 1) {
+                health = glm::max(2, health - 1);
+                speed *= 1.6f;
+                damage = 1;
+                scale = 0.55f;
+                color = glm::vec3(0.85f, 0.30f, 0.55f);
+                type = 1;
+            } else if (cycle == 2) {
+                health += 5;
+                speed *= 0.6f;
+                damage = 2;
+                scale = 1.0f;
+                color = glm::vec3(0.45f, 0.60f, 0.22f);
+                type = 2;
+            } else {
+                health += 4;
+                speed *= 0.8f;
+                damage = 1;
+                scale = 0.75f;
+                color = glm::vec3(0.30f, 0.70f, 0.35f);
+                type = 3;
+            }
+        } else if (allow_plant && roll < 15) {
+            health += 4;
+            speed *= 0.8f;
+            damage = 1;
+            scale = 0.75f;
+            color = glm::vec3(0.30f, 0.70f, 0.35f);
+            type = 3;
+        } else if (allow_tank && roll < 30) {
+            health += 5;
+            speed *= 0.6f;
+            damage = 2;
+            scale = 1.0f;
+            color = glm::vec3(0.45f, 0.60f, 0.22f);
+            type = 2;
+        } else if (allow_fast && roll < 65) {
+            health = glm::max(2, health - 1);
+            speed *= 1.6f;
+            damage = 1;
+            scale = 0.55f;
+            color = glm::vec3(0.85f, 0.30f, 0.55f);
+            type = 1;
+        }
+
+        position.y = TerrainHeightAt(position.x, position.z, position.y);
+        if (force_elite || (run_time >= 90.0f && unit_dist(rng) < 0.12f)) {
+            elite = true;
+            health += 6;
+            damage += 1;
+            scale *= 1.15f;
+            color = glm::vec3(0.95f, 0.80f, 0.25f);
+        }
+        if (health_mult > 1) {
+            health *= health_mult;
+        }
+        if (color_override.x >= 0.0f) {
+            color = color_override;
+        }
+
+        float phase = unit_dist(rng) * glm::two_pi<float>();
+        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite});
+    };
+
+    auto assign_enemy_spawners = [&](int count) {
+        std::vector<int> indices;
+        indices.reserve(static_cast<int>(buildings.size()));
+        for (int i = 0; i < static_cast<int>(buildings.size()); ++i) {
+            indices.push_back(i);
+        }
+        std::shuffle(indices.begin(), indices.end(), rng);
+        int assigned = 0;
+        int base_tank_health = (3 + player_level / 3 + 5);
+        int spawner_health = base_tank_health * 5;
+        for (int idx : indices) {
+            if (assigned >= count) {
+                break;
+            }
+            Building& building = buildings[idx];
+            if (building.owner != BuildingOwner::Neutral) {
+                continue;
+            }
+            building.owner = BuildingOwner::Enemy;
+            building.spawner = true;
+            building.destroyed = false;
+            building.max_health = spawner_health;
+            building.health = spawner_health;
+            building.capture_timer = 0.0f;
+            building.spawn_timer = 0.0f;
+            building.alive_timer = 0.0f;
+            assigned += 1;
+        }
+    };
+
+    auto ally_spawn_position = [&](const Building& building) {
+        float angle = unit_dist(rng) * glm::two_pi<float>();
+        float radius = building.size * 0.75f;
+        glm::vec2 pos = building.center + glm::vec2(std::cos(angle), std::sin(angle)) * radius;
+        float y = TerrainHeightAt(pos.x, pos.y, building.base_height);
+        return glm::vec3(pos.x, y + 0.6f, pos.y);
+    };
+
+    auto ally_ring_offset = [&](int id, float radius) {
+        float angle = static_cast<float>(id % 16) / 16.0f * glm::two_pi<float>() +
+                      std::sin(static_cast<float>(id)) * 0.35f;
+        return glm::vec2(std::cos(angle), std::sin(angle)) * radius;
+    };
+
+    auto find_nearest_player_building = [&](const glm::vec3& pos) {
+        int best_index = -1;
+        float best_dist = std::numeric_limits<float>::max();
+        for (int i = 0; i < static_cast<int>(buildings.size()); ++i) {
+            if (buildings[i].owner != BuildingOwner::Player) {
+                continue;
+            }
+            glm::vec2 delta = buildings[i].center - glm::vec2(pos.x, pos.z);
+            float dist = glm::dot(delta, delta);
+            if (dist < best_dist) {
+                best_dist = dist;
+                best_index = i;
+            }
+        }
+        return best_index;
+    };
+
+    auto command_units = [&](UnitState state, int guard_index) {
+        float command_radius = attack_radius * 1.3f;
+        float command_radius_sq = command_radius * command_radius;
+        for (Ally& ally : allies) {
+            if (!ally.alive) {
+                continue;
+            }
+            glm::vec2 delta = glm::vec2(ally.position.x - player_position.x,
+                                        ally.position.z - player_position.z);
+            if (glm::dot(delta, delta) > command_radius_sq) {
+                continue;
+            }
+            ally.state = state;
+            ally.guard_index = guard_index;
+        }
+    };
+
     auto save_progress = [&]() {
         save_data.coins = coins;
         save_data.damage_level = meta_damage_level;
@@ -1371,6 +1617,7 @@ struct Obstacle {
             GenerateTerrain(terrain_seed);
             rebuild_ground();
             rebuild_ramp_walls();
+            rebuild_buildings();
             rebuild_obstacles();
             terrain_dirty = false;
         }
@@ -1381,6 +1628,9 @@ struct Obstacle {
         explosions.clear();
         current_choices.clear();
         pickups.clear();
+        allies.clear();
+        rebuild_buildings();
+        rebuild_obstacles();
 
         player_position = glm::vec3(0.0f, 0.0f, 0.0f);
         player_position.y = TerrainHeightAt(player_position.x, player_position.z, player_position.y);
@@ -1413,6 +1663,8 @@ struct Obstacle {
         coins_earned = 0;
         victory = false;
         freeze_timer = 0.0f;
+        enemy_spawner_timer = 0.0f;
+        assign_enemy_spawners(4);
     };
 
     auto end_run = [&](bool won) {
@@ -1592,6 +1844,7 @@ struct Obstacle {
                         GenerateTerrain(terrain_seed);
                         rebuild_ground();
                         rebuild_ramp_walls();
+                        rebuild_buildings();
                         rebuild_obstacles();
                         terrain_dirty = false;
                     } else if (key == SDLK_RETURN || key == SDLK_SPACE) {
@@ -1658,7 +1911,16 @@ struct Obstacle {
                         }
                     }
                 } else if (state == GameState::Running) {
-                    if (key == SDLK_ESCAPE) {
+                    if (key == SDLK_v) {
+                        command_units(UnitState::Follow, -1);
+                    } else if (key == SDLK_h) {
+                        command_units(UnitState::Home, -1);
+                    } else if (key == SDLK_g) {
+                        int guard_index = find_nearest_player_building(player_position);
+                        if (guard_index >= 0) {
+                            command_units(UnitState::Guard, guard_index);
+                        }
+                    } else if (key == SDLK_ESCAPE) {
                         state = GameState::Paused;
                     }
                 } else if (state == GameState::Paused) {
@@ -1890,6 +2152,125 @@ struct Obstacle {
                 }
             }
 
+            enemy_spawner_timer += delta_time;
+            if (enemy_spawner_timer >= enemy_spawner_interval) {
+                enemy_spawner_timer = 0.0f;
+                assign_enemy_spawners(1);
+            }
+
+            for (Building& building : buildings) {
+                if (building.owner == BuildingOwner::Player) {
+                    building.veteran_timer += delta_time;
+                }
+                if (building.owner == BuildingOwner::Enemy && building.spawner) {
+                    building.alive_timer += delta_time;
+                    building.spawn_timer += delta_time;
+                    float spawn_interval_building = glm::max(2.5f, 4.8f - run_time * 0.02f);
+                    if (building.spawn_timer >= spawn_interval_building) {
+                        building.spawn_timer = 0.0f;
+                        int spawn_count = building.alive_timer >= 120.0f ? 3 : 2;
+                        float spawn_radius = building.size * 0.7f + 1.2f;
+                        for (int s = 0; s < spawn_count; ++s) {
+                            float angle = unit_dist(rng) * glm::two_pi<float>();
+                            glm::vec2 offset(std::cos(angle), std::sin(angle));
+                            glm::vec3 spawn_pos(building.center.x + offset.x * spawn_radius,
+                                                building.base_height,
+                                                building.center.y + offset.y * spawn_radius);
+                            bool gold = building.alive_timer >= 120.0f;
+                            glm::vec3 color = gold ? glm::vec3(0.95f, 0.85f, 0.30f)
+                                                   : glm::vec3(0.95f, 0.20f, 0.20f);
+                            spawn_enemy_at(spawn_pos, gold ? 3 : 2, color, gold);
+                        }
+                    }
+                }
+            }
+
+            if (garlic_level > 0) {
+                for (Building& building : buildings) {
+                    if (building.owner == BuildingOwner::Player) {
+                        continue;
+                    }
+                    if (std::abs(player_position.y - building.base_height) > 2.0f) {
+                        building.capture_timer = glm::max(0.0f, building.capture_timer - delta_time * 1.5f);
+                        continue;
+                    }
+                    glm::vec2 delta = building.center - glm::vec2(player_position.x, player_position.z);
+                    float dist_sq = glm::dot(delta, delta);
+                    if (dist_sq <= attack_radius * attack_radius) {
+                        building.capture_timer += delta_time;
+                    } else {
+                        building.capture_timer = glm::max(0.0f, building.capture_timer - delta_time * 1.5f);
+                    }
+                    if (building.capture_timer >= 5.0f) {
+                        building.owner = BuildingOwner::Player;
+                        building.spawner = false;
+                        building.capture_timer = 0.0f;
+                        building.veteran_timer = 0.0f;
+                        building.alive_timer = 0.0f;
+                        building.max_health = 10;
+                        building.health = building.max_health;
+                        rebuild_obstacles();
+                    }
+                }
+            }
+
+            std::vector<int> alive_counts(buildings.size(), 0);
+            std::vector<int> slot_counts(buildings.size(), 0);
+            for (const Ally& ally : allies) {
+                if (ally.home_index < 0 || ally.home_index >= static_cast<int>(buildings.size())) {
+                    continue;
+                }
+                slot_counts[ally.home_index] += 1;
+                if (ally.alive) {
+                    alive_counts[ally.home_index] += 1;
+                }
+            }
+
+            for (Ally& ally : allies) {
+                if (ally.alive) {
+                    continue;
+                }
+                if (ally.respawn_timer > 0.0f) {
+                    ally.respawn_timer = glm::max(0.0f, ally.respawn_timer - delta_time);
+                }
+                if (ally.respawn_timer <= 0.0f &&
+                    ally.home_index >= 0 &&
+                    ally.home_index < static_cast<int>(buildings.size())) {
+                    Building& home = buildings[ally.home_index];
+                    int max_units = home.veteran_timer >= 60.0f ? 2 : 1;
+                    if (home.owner == BuildingOwner::Player &&
+                        alive_counts[ally.home_index] < max_units) {
+                        ally.alive = true;
+                        ally.health = ally.max_health;
+                        ally.position = ally_spawn_position(home);
+                        ally.state = UnitState::Home;
+                        ally.guard_index = -1;
+                        alive_counts[ally.home_index] += 1;
+                    }
+                }
+            }
+
+            for (int i = 0; i < static_cast<int>(buildings.size()); ++i) {
+                Building& building = buildings[i];
+                if (building.owner != BuildingOwner::Player) {
+                    continue;
+                }
+                int max_units = building.veteran_timer >= 60.0f ? 2 : 1;
+                while (slot_counts[i] < max_units) {
+                    Ally ally;
+                    ally.position = ally_spawn_position(building);
+                    ally.id = ally_id_counter++;
+                    ally.home_index = i;
+                    ally.guard_index = -1;
+                    ally.state = UnitState::Home;
+                    ally.max_health = 4;
+                    ally.health = ally.max_health;
+                    allies.push_back(ally);
+                    slot_counts[i] += 1;
+                    alive_counts[i] += 1;
+                }
+            }
+
             if (freeze_timer > 0.0f) {
                 freeze_timer -= delta_time;
             } else {
@@ -1956,6 +2337,125 @@ struct Obstacle {
                 }
             }
 
+            for (Ally& ally : allies) {
+                if (!ally.alive) {
+                    continue;
+                }
+                glm::vec3 target = ally.position;
+                float follow_jump_bonus = 0.0f;
+                bool ally_jump_active = false;
+                if (ally.state == UnitState::Follow) {
+                    glm::vec2 offset = ally_ring_offset(ally.id, attack_radius * 0.75f);
+                    target = player_position + glm::vec3(offset.x, 0.0f, offset.y);
+                    follow_jump_bonus = jump_timer > 0.0f ? 1.0f : 0.0f;
+                    ally_jump_active = (jump_timer > 0.0f || jump_release_timer > 0.0f);
+                } else if (ally.state == UnitState::Guard) {
+                    if (ally.guard_index >= 0 &&
+                        ally.guard_index < static_cast<int>(buildings.size()) &&
+                        buildings[ally.guard_index].owner == BuildingOwner::Player) {
+                        glm::vec2 offset = ally_ring_offset(ally.id, buildings[ally.guard_index].size * 0.65f);
+                        target = glm::vec3(buildings[ally.guard_index].center.x + offset.x,
+                                           ally.position.y,
+                                           buildings[ally.guard_index].center.y + offset.y);
+                    } else if (ally.home_index >= 0 &&
+                               ally.home_index < static_cast<int>(buildings.size())) {
+                        glm::vec2 offset = ally_ring_offset(ally.id, buildings[ally.home_index].size * 0.65f);
+                        target = glm::vec3(buildings[ally.home_index].center.x + offset.x,
+                                           ally.position.y,
+                                           buildings[ally.home_index].center.y + offset.y);
+                        ally.state = UnitState::Home;
+                    }
+                } else if (ally.home_index >= 0 &&
+                           ally.home_index < static_cast<int>(buildings.size())) {
+                    glm::vec2 offset = ally_ring_offset(ally.id, buildings[ally.home_index].size * 0.65f);
+                    target = glm::vec3(buildings[ally.home_index].center.x + offset.x,
+                                       ally.position.y,
+                                       buildings[ally.home_index].center.y + offset.y);
+                }
+
+                bool militia = false;
+                for (const Building& building : buildings) {
+                    if (building.owner != BuildingOwner::Player) {
+                        continue;
+                    }
+                    glm::vec2 delta = building.center - glm::vec2(ally.position.x, ally.position.z);
+                    if (glm::dot(delta, delta) <= 36.0f) {
+                        militia = true;
+                        break;
+                    }
+                }
+
+                float ally_speed = militia ? 3.6f : 3.0f;
+                int ally_damage = militia ? 3 : 2;
+                glm::vec3 to_target = target - ally.position;
+                to_target.y = 0.0f;
+                float dist = glm::length(to_target);
+                if (dist > 0.1f) {
+                    glm::vec3 dir = to_target / dist;
+                    glm::vec3 desired = ally.position + dir * ally_speed * delta_time;
+                    glm::vec2 desired_xz(desired.x, desired.z);
+                    glm::vec2 ally_xz(ally.position.x, ally.position.z);
+                    float step_limit = max_step_height + follow_jump_bonus;
+                    bool blocked = !can_step(ally_xz, desired_xz, step_limit, ally.position.y);
+                    for (const Obstacle& box : obstacles) {
+                        if (!obstacle_active(box, ally.position.y)) {
+                            continue;
+                        }
+                        if (box.is_building && box.owner == BuildingOwner::Player) {
+                            continue;
+                        }
+                        if (ally_jump_active && box.is_ramp_wall) {
+                            continue;
+                        }
+                        if (circle_intersects_aabb(desired_xz, 0.45f, box)) {
+                            blocked = true;
+                            break;
+                        }
+                    }
+                    if (!blocked) {
+                        ally.position.x = desired.x;
+                        ally.position.z = desired.z;
+                    }
+                    float target_y = TerrainHeightAt(ally.position.x, ally.position.z, ally.position.y);
+                    if (follow_jump_bonus > 0.0f) {
+                        target_y += 0.6f;
+                    }
+                    ally.position.y = glm::mix(ally.position.y, target_y, 0.35f);
+                }
+
+                if (ally.attack_timer > 0.0f) {
+                    ally.attack_timer = glm::max(0.0f, ally.attack_timer - delta_time);
+                }
+                if (ally.attack_timer <= 0.0f) {
+                    for (Enemy& enemy : enemies) {
+                        glm::vec3 delta = enemy.position - ally.position;
+                        if (glm::length(delta) <= 1.2f) {
+                            enemy.health -= ally_damage;
+                            ally.attack_timer = 0.6f;
+                            break;
+                        }
+                    }
+                }
+
+                if (ally.hurt_timer > 0.0f) {
+                    ally.hurt_timer = glm::max(0.0f, ally.hurt_timer - delta_time);
+                }
+                if (ally.hurt_timer <= 0.0f) {
+                    for (const Enemy& enemy : enemies) {
+                        glm::vec3 delta = enemy.position - ally.position;
+                        if (glm::length(delta) <= 0.9f) {
+                            ally.health -= enemy.damage;
+                            ally.hurt_timer = 0.8f;
+                            break;
+                        }
+                    }
+                }
+                if (ally.health <= 0) {
+                    ally.alive = false;
+                    ally.respawn_timer = 20.0f;
+                }
+            }
+
             float prev_jump_timer = jump_timer;
             if (jump_timer > 0.0f) {
                 jump_timer = glm::max(0.0f, jump_timer - delta_time);
@@ -1976,9 +2476,26 @@ struct Obstacle {
                     attack_timer = 0.0f;
                     for (Enemy& enemy : enemies) {
                         glm::vec3 delta = enemy.position - player_position;
-                        delta.y = 0.0f;
                         if (glm::length(delta) <= attack_radius) {
                             enemy.health -= attack_damage;
+                        }
+                    }
+                    for (Building& building : buildings) {
+                        if (building.owner != BuildingOwner::Enemy || !building.spawner) {
+                            continue;
+                        }
+                        glm::vec2 delta = building.center - glm::vec2(player_position.x, player_position.z);
+                        float dy = (building.base_height + 0.5f) - player_position.y;
+                        if (glm::dot(delta, delta) + dy * dy <= attack_radius * attack_radius) {
+                            building.health -= attack_damage;
+                            if (building.health <= 0) {
+                                building.owner = BuildingOwner::Neutral;
+                                building.spawner = false;
+                                building.health = building.max_health;
+                                building.alive_timer = 0.0f;
+                                building.capture_timer = 0.0f;
+                                rebuild_obstacles();
+                            }
                         }
                     }
                 }
@@ -2046,6 +2563,23 @@ struct Obstacle {
                             enemy.health -= bomb_damage;
                         }
                     }
+                    for (Building& building : buildings) {
+                        if (building.owner != BuildingOwner::Enemy || !building.spawner) {
+                            continue;
+                        }
+                        glm::vec2 delta = building.center - glm::vec2(bombs[i].position.x, bombs[i].position.z);
+                        if (glm::dot(delta, delta) <= bomb_radius * bomb_radius) {
+                            building.health -= bomb_damage;
+                            if (building.health <= 0) {
+                                building.owner = BuildingOwner::Neutral;
+                                building.spawner = false;
+                                building.health = building.max_health;
+                                building.alive_timer = 0.0f;
+                                building.capture_timer = 0.0f;
+                                rebuild_obstacles();
+                            }
+                        }
+                    }
                     bombs[i] = bombs.back();
                     bombs.pop_back();
                 } else {
@@ -2065,11 +2599,32 @@ struct Obstacle {
                 bool hit = false;
                 for (Enemy& enemy : enemies) {
                     glm::vec3 delta = enemy.position - projectiles[i].position;
-                    delta.y = 0.0f;
                     if (glm::length(delta) <= 0.6f) {
                         enemy.health -= projectiles[i].damage;
                         hit = true;
                         break;
+                    }
+                }
+                if (!hit) {
+                    for (Building& building : buildings) {
+                        if (building.owner != BuildingOwner::Enemy || !building.spawner) {
+                            continue;
+                        }
+                        glm::vec2 delta = building.center - glm::vec2(projectiles[i].position.x, projectiles[i].position.z);
+                        float dy = (building.base_height + 0.5f) - projectiles[i].position.y;
+                        if (glm::dot(delta, delta) + dy * dy <= 0.6f * 0.6f) {
+                            building.health -= projectiles[i].damage;
+                            hit = true;
+                            if (building.health <= 0) {
+                                building.owner = BuildingOwner::Neutral;
+                                building.spawner = false;
+                                building.health = building.max_health;
+                                building.alive_timer = 0.0f;
+                                building.capture_timer = 0.0f;
+                                rebuild_obstacles();
+                            }
+                            break;
+                        }
                     }
                 }
                 if (hit) {
@@ -2084,7 +2639,6 @@ struct Obstacle {
             int contact_damage = 0;
             for (const Enemy& enemy : enemies) {
                 glm::vec3 delta = enemy.position - player_position;
-                delta.y = 0.0f;
                 if (glm::length(delta) <= player_contact_radius) {
                     player_contact = true;
                     contact_damage = glm::max(contact_damage, enemy.damage);
@@ -2121,7 +2675,6 @@ struct Obstacle {
 
             for (size_t i = 0; i < gems.size();) {
                 glm::vec3 delta = gems[i].position - player_position;
-                delta.y = 0.0f;
                 if (glm::length(delta) <= 1.0f) {
                     player_xp += 1;
                     gems[i] = gems.back();
@@ -2133,7 +2686,6 @@ struct Obstacle {
 
             for (size_t i = 0; i < pickups.size();) {
                 glm::vec3 delta = pickups[i].position - player_position;
-                delta.y = 0.0f;
                 if (glm::length(delta) <= 1.1f) {
                     switch (pickups[i].type) {
                         case PickupType::Coin:
@@ -2307,39 +2859,69 @@ struct Obstacle {
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
         glLineWidth(1.5f);
-        const int city_half = 6;
-        const float block_size = kTileSize;
-        for (int x = -city_half; x <= city_half; ++x) {
-            for (int z = -city_half; z <= city_half; ++z) {
-                if ((x + z) % 2 != 0) {
-                    continue;
+        for (const Building& building : buildings) {
+            glm::vec3 base(building.center.x,
+                           building.base_height + building.height * 0.5f,
+                           building.center.y);
+            glm::mat4 block = glm::translate(glm::mat4(1.0f), base);
+            block = glm::scale(block, glm::vec3(building.size, building.height, building.size));
+            glm::mat4 block_mvp = projection * view * block;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(block_mvp));
+            glm::vec3 color(0.20f, 0.75f, 0.95f);
+            if (building.owner == BuildingOwner::Enemy && building.spawner) {
+                if (building.alive_timer >= 120.0f) {
+                    color = glm::vec3(0.95f, 0.85f, 0.30f);
+                } else {
+                    color = glm::vec3(0.95f, 0.25f, 0.25f);
                 }
-                if (x == 0 && z == 0) {
-                    continue;
+            } else if (building.owner == BuildingOwner::Player) {
+                if (building.veteran_timer >= 60.0f) {
+                    color = glm::vec3(0.75f, 0.35f, 0.95f);
+                } else {
+                    color = glm::vec3(0.25f, 0.95f, 0.45f);
                 }
-                float wx = static_cast<float>(x) * block_size;
-                float wz = static_cast<float>(z) * block_size;
-                glm::vec2 pos(wx, wz);
-                if (!IsOnPlateau(pos) || IsOnRamp(pos)) {
-                    continue;
-                }
-                float height = 1.5f + 0.6f * static_cast<float>((x * x + z * z) % 6);
-                glm::vec3 base(static_cast<float>(x) * block_size,
-                               PlateauHeightAt(glm::vec2(wx, wz)) + height * 0.5f,
-                               static_cast<float>(z) * block_size);
-                glm::mat4 block = glm::translate(glm::mat4(1.0f), base);
-                block = glm::scale(block, glm::vec3(block_half * 2.0f, height, block_half * 2.0f));
-                glm::mat4 block_mvp = projection * view * block;
-                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(block_mvp));
-                float glow = 0.55f + 0.45f * std::sin(run_time * 1.5f + (x + z) * 0.6f);
-                glUniform3f(color_location, 0.25f * glow, 0.75f * glow, 0.95f * glow);
-                glBindVertexArray(cube_vao);
-                glDrawArrays(GL_TRIANGLES, 0, 36);
-                glBindVertexArray(0);
             }
+            float glow = 0.55f + 0.45f * std::sin(run_time * 1.5f + building.center.x * 0.05f);
+            glUniform3f(color_location, color.r * glow, color.g * glow, color.b * glow);
+            glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
         }
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         glDisable(GL_BLEND);
+
+        if (state == GameState::Running && garlic_level > 0) {
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(ring_program);
+            for (const Building& building : buildings) {
+                if (building.owner == BuildingOwner::Player) {
+                    continue;
+                }
+                glm::vec2 delta = building.center - glm::vec2(player_position.x, player_position.z);
+                float dist_sq = glm::dot(delta, delta);
+                bool nearby = dist_sq <= attack_radius * attack_radius;
+                if (!nearby && building.capture_timer <= 0.01f) {
+                    continue;
+                }
+                float progress = glm::clamp(building.capture_timer / 5.0f, 0.0f, 1.0f);
+                glm::vec3 ring_pos(building.center.x, building.base_height + 0.05f, building.center.y);
+                glm::mat4 ring_model = glm::translate(glm::mat4(1.0f), ring_pos);
+                ring_model = glm::scale(ring_model, glm::vec3(1.8f, 1.0f, 1.8f));
+                glm::mat4 ring_mvp = projection * view * ring_model;
+                glUniformMatrix4fv(ring_mvp_location, 1, GL_FALSE, glm::value_ptr(ring_mvp));
+                glUniform3f(ring_color_location, 0.35f, 0.75f, 1.0f);
+                glUniform1f(ring_phase_location, progress);
+                glUniform1f(ring_alpha_location, 0.65f);
+                glBindVertexArray(ring_vao);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+            }
+            glBindVertexArray(0);
+            glDisable(GL_BLEND);
+            glEnable(GL_DEPTH_TEST);
+            glUseProgram(program);
+        }
 
         if (state == GameState::Running && garlic_level > 0) {
             glDisable(GL_DEPTH_TEST);
@@ -2470,6 +3052,35 @@ struct Obstacle {
                 glDrawArrays(GL_TRIANGLES, 0, 36);
                 glBindVertexArray(0);
             }
+        }
+
+        for (const Ally& ally : allies) {
+            if (!ally.alive) {
+                continue;
+            }
+            glm::vec3 ally_color(0.25f, 0.95f, 0.55f);
+            if (ally.state == UnitState::Follow) {
+                ally_color = glm::vec3(0.35f, 0.85f, 0.95f);
+            } else if (ally.state == UnitState::Guard) {
+                ally_color = glm::vec3(0.85f, 0.85f, 0.30f);
+            }
+            glUniform3f(color_location, ally_color.r, ally_color.g, ally_color.b);
+            glm::vec3 base_pos = ally.position + glm::vec3(0.0f, 0.25f, 0.0f);
+            glm::mat4 body = glm::translate(glm::mat4(1.0f), base_pos);
+            body = glm::scale(body, glm::vec3(0.5f, 0.35f, 0.6f));
+            glm::mat4 body_mvp = projection * view * body;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(body_mvp));
+            glBindVertexArray(cylinder_mesh.vao);
+            glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
+            glBindVertexArray(0);
+
+            glm::mat4 head = glm::translate(glm::mat4(1.0f), base_pos + glm::vec3(0.0f, 0.25f, 0.0f));
+            head = glm::scale(head, glm::vec3(0.28f));
+            glm::mat4 head_mvp = projection * view * head;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(head_mvp));
+            glBindVertexArray(sphere_mesh.vao);
+            glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
+            glBindVertexArray(0);
         }
 
         for (const ExperienceGem& gem : gems) {
@@ -2656,6 +3267,12 @@ struct Obstacle {
                          timer_width, bar_height, glm::vec3(0.18f, 0.18f, 0.22f), ui_projection);
             draw_ui_quad(window_width - margin - timer_width, window_height - margin - bar_height,
                          timer_width * timer_ratio, bar_height, glm::vec3(0.85f, 0.72f, 0.25f), ui_projection);
+            SDL_Color ui_hint{160, 170, 185, 255};
+            draw_text(window_width - margin - timer_width,
+                      window_height - margin - bar_height * 2.2f,
+                      "V Follow  H Home  G Guard",
+                      ui_hint,
+                      ui_projection);
 
             float icon_size = 10.0f;
             float icon_x = window_width - margin - icon_size;
