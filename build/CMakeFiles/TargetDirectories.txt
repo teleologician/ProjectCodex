@@ -1,0 +1,3 @@
+C:/ProjectCodex/build/CMakeFiles/hello.dir
+C:/ProjectCodex/build/CMakeFiles/ALL_BUILD.dir
+C:/ProjectCodex/build/CMakeFiles/ZERO_CHECK.dir
