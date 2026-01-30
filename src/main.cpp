@@ -14,6 +14,12 @@
 #include <glm/gtc/type_ptr.hpp>
 
 namespace {
+struct Mesh {
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    GLsizei count = 0;
+};
+
 GLuint CompileShader(GLenum type, const char* source) {
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, nullptr);
@@ -150,6 +156,138 @@ TTF_Font* LoadUIFont(int size) {
     }
     return nullptr;
 }
+
+std::vector<float> BuildSphereVertices(int stacks, int slices, float radius) {
+    std::vector<float> vertices;
+    vertices.reserve(static_cast<size_t>(stacks * slices * 6) * 3);
+    for (int i = 0; i < stacks; ++i) {
+        float v0 = static_cast<float>(i) / static_cast<float>(stacks);
+        float v1 = static_cast<float>(i + 1) / static_cast<float>(stacks);
+        float phi0 = glm::pi<float>() * (v0 - 0.5f);
+        float phi1 = glm::pi<float>() * (v1 - 0.5f);
+        float y0 = std::sin(phi0);
+        float y1 = std::sin(phi1);
+        float r0 = std::cos(phi0);
+        float r1 = std::cos(phi1);
+
+        for (int j = 0; j < slices; ++j) {
+            float u0 = static_cast<float>(j) / static_cast<float>(slices);
+            float u1 = static_cast<float>(j + 1) / static_cast<float>(slices);
+            float theta0 = glm::two_pi<float>() * u0;
+            float theta1 = glm::two_pi<float>() * u1;
+
+            glm::vec3 p00(r0 * std::cos(theta0), y0, r0 * std::sin(theta0));
+            glm::vec3 p10(r0 * std::cos(theta1), y0, r0 * std::sin(theta1));
+            glm::vec3 p01(r1 * std::cos(theta0), y1, r1 * std::sin(theta0));
+            glm::vec3 p11(r1 * std::cos(theta1), y1, r1 * std::sin(theta1));
+
+            glm::vec3 tri1[3] = {p00, p11, p10};
+            glm::vec3 tri2[3] = {p00, p01, p11};
+            for (int k = 0; k < 3; ++k) {
+                vertices.push_back(tri1[k].x * radius);
+                vertices.push_back(tri1[k].y * radius);
+                vertices.push_back(tri1[k].z * radius);
+            }
+            for (int k = 0; k < 3; ++k) {
+                vertices.push_back(tri2[k].x * radius);
+                vertices.push_back(tri2[k].y * radius);
+                vertices.push_back(tri2[k].z * radius);
+            }
+        }
+    }
+    return vertices;
+}
+
+std::vector<float> BuildConeVertices(int slices, float radius, float height) {
+    std::vector<float> vertices;
+    vertices.reserve(static_cast<size_t>(slices * 6) * 3);
+    glm::vec3 tip(0.0f, height * 0.5f, 0.0f);
+    float base_y = -height * 0.5f;
+    for (int j = 0; j < slices; ++j) {
+        float u0 = static_cast<float>(j) / static_cast<float>(slices);
+        float u1 = static_cast<float>(j + 1) / static_cast<float>(slices);
+        float theta0 = glm::two_pi<float>() * u0;
+        float theta1 = glm::two_pi<float>() * u1;
+        glm::vec3 p0(radius * std::cos(theta0), base_y, radius * std::sin(theta0));
+        glm::vec3 p1(radius * std::cos(theta1), base_y, radius * std::sin(theta1));
+
+        // Side triangle
+        glm::vec3 tri1[3] = {tip, p0, p1};
+        // Base triangle
+        glm::vec3 tri2[3] = {glm::vec3(0.0f, base_y, 0.0f), p1, p0};
+
+        for (int k = 0; k < 3; ++k) {
+            vertices.push_back(tri1[k].x);
+            vertices.push_back(tri1[k].y);
+            vertices.push_back(tri1[k].z);
+        }
+        for (int k = 0; k < 3; ++k) {
+            vertices.push_back(tri2[k].x);
+            vertices.push_back(tri2[k].y);
+            vertices.push_back(tri2[k].z);
+        }
+    }
+    return vertices;
+}
+
+std::vector<float> BuildCylinderVertices(int slices, float radius, float height) {
+    std::vector<float> vertices;
+    vertices.reserve(static_cast<size_t>(slices * 12) * 3);
+    float half = height * 0.5f;
+    for (int j = 0; j < slices; ++j) {
+        float u0 = static_cast<float>(j) / static_cast<float>(slices);
+        float u1 = static_cast<float>(j + 1) / static_cast<float>(slices);
+        float theta0 = glm::two_pi<float>() * u0;
+        float theta1 = glm::two_pi<float>() * u1;
+
+        glm::vec3 p00(radius * std::cos(theta0), -half, radius * std::sin(theta0));
+        glm::vec3 p01(radius * std::cos(theta0),  half, radius * std::sin(theta0));
+        glm::vec3 p10(radius * std::cos(theta1), -half, radius * std::sin(theta1));
+        glm::vec3 p11(radius * std::cos(theta1),  half, radius * std::sin(theta1));
+
+        glm::vec3 side1[3] = {p00, p01, p11};
+        glm::vec3 side2[3] = {p00, p11, p10};
+        glm::vec3 top[3] = {glm::vec3(0.0f, half, 0.0f), p11, p01};
+        glm::vec3 bottom[3] = {glm::vec3(0.0f, -half, 0.0f), p00, p10};
+
+        for (int k = 0; k < 3; ++k) {
+            vertices.push_back(side1[k].x);
+            vertices.push_back(side1[k].y);
+            vertices.push_back(side1[k].z);
+        }
+        for (int k = 0; k < 3; ++k) {
+            vertices.push_back(side2[k].x);
+            vertices.push_back(side2[k].y);
+            vertices.push_back(side2[k].z);
+        }
+        for (int k = 0; k < 3; ++k) {
+            vertices.push_back(top[k].x);
+            vertices.push_back(top[k].y);
+            vertices.push_back(top[k].z);
+        }
+        for (int k = 0; k < 3; ++k) {
+            vertices.push_back(bottom[k].x);
+            vertices.push_back(bottom[k].y);
+            vertices.push_back(bottom[k].z);
+        }
+    }
+    return vertices;
+}
+
+Mesh CreateMesh(const std::vector<float>& vertices) {
+    Mesh mesh;
+    glGenVertexArrays(1, &mesh.vao);
+    glGenBuffers(1, &mesh.vbo);
+    glBindVertexArray(mesh.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    mesh.count = static_cast<GLsizei>(vertices.size() / 3);
+    return mesh;
+}
 }  // namespace
 
 int main() {
@@ -243,6 +381,36 @@ int main() {
         "    FragColor = tex * uTint;\n"
         "}\n";
 
+    const char* ring_vertex_source =
+        "#version 330 core\n"
+        "layout (location = 0) in vec3 aPos;\n"
+        "out vec2 vLocal;\n"
+        "uniform mat4 uMVP;\n"
+        "void main() {\n"
+        "    vLocal = aPos.xz;\n"
+        "    gl_Position = uMVP * vec4(aPos, 1.0);\n"
+        "}\n";
+
+    const char* ring_fragment_source =
+        "#version 330 core\n"
+        "in vec2 vLocal;\n"
+        "out vec4 FragColor;\n"
+        "uniform vec3 uColor;\n"
+        "uniform float uPhase;\n"
+        "void main() {\n"
+        "    float dist = length(vLocal);\n"
+        "    float rise = smoothstep(0.0, 0.45, uPhase);\n"
+        "    float fall = 1.0 - smoothstep(0.55, 1.0, uPhase);\n"
+        "    float pulse = rise * fall;\n"
+        "    float radius = mix(0.35, 1.05, rise);\n"
+        "    float thickness = mix(0.25, 0.10, rise);\n"
+        "    float edge = abs(dist - radius);\n"
+        "    float ring = smoothstep(thickness, 0.0, edge);\n"
+        "    float alpha = ring * (0.25 + 0.75 * pulse);\n"
+        "    if (alpha <= 0.01) discard;\n"
+        "    FragColor = vec4(uColor, alpha);\n"
+        "}\n";
+
     GLuint vs = CompileShader(GL_VERTEX_SHADER, vertex_source);
     GLuint fs = CompileShader(GL_FRAGMENT_SHADER, fragment_source);
     if (!vs || !fs) {
@@ -279,6 +447,30 @@ int main() {
     glDeleteShader(text_vs);
     glDeleteShader(text_fs);
     if (!text_program) {
+        glDeleteProgram(program);
+        SDL_GL_DeleteContext(gl_context);
+        SDL_DestroyWindow(window);
+        TTF_Quit();
+        SDL_Quit();
+        return EXIT_FAILURE;
+    }
+
+    GLuint ring_vs = CompileShader(GL_VERTEX_SHADER, ring_vertex_source);
+    GLuint ring_fs = CompileShader(GL_FRAGMENT_SHADER, ring_fragment_source);
+    if (!ring_vs || !ring_fs) {
+        glDeleteProgram(text_program);
+        glDeleteProgram(program);
+        SDL_GL_DeleteContext(gl_context);
+        SDL_DestroyWindow(window);
+        TTF_Quit();
+        SDL_Quit();
+        return EXIT_FAILURE;
+    }
+    GLuint ring_program = LinkProgram(ring_vs, ring_fs);
+    glDeleteShader(ring_vs);
+    glDeleteShader(ring_fs);
+    if (!ring_program) {
+        glDeleteProgram(text_program);
         glDeleteProgram(program);
         SDL_GL_DeleteContext(gl_context);
         SDL_DestroyWindow(window);
@@ -351,6 +543,16 @@ int main() {
         0.0f, 1.0f, 0.0f
     };
 
+    float ring_vertices[] = {
+        -1.3f, 0.0f, -1.3f,
+         1.3f, 0.0f, -1.3f,
+         1.3f, 0.0f,  1.3f,
+
+        -1.3f, 0.0f, -1.3f,
+         1.3f, 0.0f,  1.3f,
+        -1.3f, 0.0f,  1.3f
+    };
+
     GLuint ground_vao = 0;
     GLuint ground_vbo = 0;
     glGenVertexArrays(1, &ground_vao);
@@ -402,13 +604,33 @@ int main() {
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 
+    GLuint ring_vao = 0;
+    GLuint ring_vbo = 0;
+    glGenVertexArrays(1, &ring_vao);
+    glGenBuffers(1, &ring_vbo);
+    glBindVertexArray(ring_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, ring_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(ring_vertices), ring_vertices, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+
+    Mesh sphere_mesh = CreateMesh(BuildSphereVertices(8, 12, 0.5f));
+    Mesh cone_mesh = CreateMesh(BuildConeVertices(12, 0.5f, 1.0f));
+    Mesh cylinder_mesh = CreateMesh(BuildCylinderVertices(12, 0.35f, 0.9f));
+
     GLint mvp_location = glGetUniformLocation(program, "uMVP");
     GLint color_location = glGetUniformLocation(program, "uColor");
     GLint text_mvp_location = glGetUniformLocation(text_program, "uMVP");
     GLint text_tint_location = glGetUniformLocation(text_program, "uTint");
     GLint text_texture_location = glGetUniformLocation(text_program, "uTexture");
+    GLint ring_mvp_location = glGetUniformLocation(ring_program, "uMVP");
+    GLint ring_color_location = glGetUniformLocation(ring_program, "uColor");
+    GLint ring_phase_location = glGetUniformLocation(ring_program, "uPhase");
 
     TTF_Font* ui_font = LoadUIFont(18);
+    TTF_Font* ui_font_small = LoadUIFont(14);
     if (!ui_font) {
         std::cerr << "Failed to load a UI font (try adding one in assets/)." << std::endl;
     }
@@ -417,10 +639,27 @@ int main() {
         glm::vec3 position;
         float speed;
         int health;
+        int damage;
+        float scale;
+        glm::vec3 color;
+        float phase;
+        int type;
     };
 
     struct ExperienceGem {
         glm::vec3 position;
+    };
+
+    enum class PickupType {
+        Coin,
+        Health,
+        Nuke,
+        Freeze
+    };
+
+    struct Pickup {
+        glm::vec3 position;
+        PickupType type;
     };
 
     struct Projectile {
@@ -494,7 +733,9 @@ int main() {
     std::vector<Enemy> enemies;
     std::vector<ExperienceGem> gems;
     std::vector<Projectile> projectiles;
+    std::vector<Pickup> pickups;
     float spawn_timer = 0.0f;
+    int early_spawn_index = 0;
     const float base_spawn_interval = 2.0f;
     float attack_timer = 0.0f;
     float attack_interval = 1.0f;
@@ -510,6 +751,8 @@ int main() {
     float fireball_cooldown = 1.5f;
     int fireball_damage = 2;
 
+    float freeze_timer = 0.0f;
+
     std::vector<ItemChoice> current_choices;
 
     auto spawn_enemy = [&]() {
@@ -524,8 +767,71 @@ int main() {
         } else {
             position = glm::vec3(edge_dist(rng), 0.0f, play_area_extent);
         }
+        float minute = run_time / 60.0f;
+        int roll = static_cast<int>(unit_dist(rng) * 100.0f);
+        bool allow_fast = minute >= 1.0f;
+        bool allow_tank = minute >= 2.0f;
+        bool allow_plant = minute >= 3.0f;
+
         int health = 3 + player_level / 3;
-        enemies.push_back(Enemy{position, speed_dist(rng), health});
+        float speed = speed_dist(rng);
+        int damage = 1;
+        float scale = 0.7f;
+        glm::vec3 color(0.75f, 0.38f, 0.18f);
+        int type = 0;
+
+        if (run_time < 60.0f) {
+            int cycle = early_spawn_index % 4;
+            early_spawn_index += 1;
+            if (cycle == 0) {
+                // basic
+            } else if (cycle == 1) {
+                health = glm::max(2, health - 1);
+                speed *= 1.6f;
+                damage = 1;
+                scale = 0.55f;
+                color = glm::vec3(0.85f, 0.30f, 0.55f);
+                type = 1;
+            } else if (cycle == 2) {
+                health += 6;
+                speed *= 0.6f;
+                damage = 2;
+                scale = 1.0f;
+                color = glm::vec3(0.45f, 0.60f, 0.22f);
+                type = 2;
+            } else {
+                health += 4;
+                speed *= 0.8f;
+                damage = 1;
+                scale = 0.75f;
+                color = glm::vec3(0.30f, 0.70f, 0.35f);
+                type = 3;
+            }
+        } else if (allow_plant && roll < 15) {
+            health += 4;
+            speed *= 0.8f;
+            damage = 1;
+            scale = 0.75f;
+            color = glm::vec3(0.30f, 0.70f, 0.35f);
+            type = 3;
+        } else if (allow_tank && roll < 30) {
+            health += 6;
+            speed *= 0.6f;
+            damage = 2;
+            scale = 1.0f;
+            color = glm::vec3(0.45f, 0.60f, 0.22f);
+            type = 2;
+        } else if (allow_fast && roll < 65) {
+            health = glm::max(2, health - 1);
+            speed *= 1.6f;
+            damage = 1;
+            scale = 0.55f;
+            color = glm::vec3(0.85f, 0.30f, 0.55f);
+            type = 1;
+        }
+
+        float phase = unit_dist(rng) * glm::two_pi<float>();
+        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type});
     };
 
     auto save_progress = [&]() {
@@ -543,6 +849,7 @@ int main() {
         gems.clear();
         projectiles.clear();
         current_choices.clear();
+        pickups.clear();
 
         player_position = glm::vec3(0.0f, 0.0f, 0.0f);
         player_level = 1;
@@ -561,12 +868,14 @@ int main() {
         fireball_damage = 2 + meta_damage_level;
 
         spawn_timer = 0.0f;
+        early_spawn_index = 0;
         attack_timer = 0.0f;
         player_damage_timer = 0.0f;
         run_time = 0.0f;
         enemies_killed = 0;
         coins_earned = 0;
         victory = false;
+        freeze_timer = 0.0f;
     };
 
     auto end_run = [&](bool won) {
@@ -590,12 +899,12 @@ int main() {
         glBindVertexArray(0);
     };
 
-    auto draw_text = [&](float x, float y, const std::string& text, SDL_Color color,
-                         const glm::mat4& projection) {
-        if (!ui_font) {
+    auto draw_text_with_font = [&](TTF_Font* font, float x, float y, const std::string& text,
+                                   SDL_Color color, const glm::mat4& projection) {
+        if (!font) {
             return;
         }
-        TextTexture texture = CreateTextTexture(ui_font, text, color);
+        TextTexture texture = CreateTextTexture(font, text, color);
         if (texture.id == 0) {
             return;
         }
@@ -633,6 +942,11 @@ int main() {
 
         DestroyTextTexture(&texture);
         glUseProgram(program);
+    };
+
+    auto draw_text = [&](float x, float y, const std::string& text, SDL_Color color,
+                         const glm::mat4& projection) {
+        draw_text_with_font(ui_font, x, y, text, color, projection);
     };
 
     auto draw_text_centered = [&](float x, float y, float w, float h, const std::string& text,
@@ -849,20 +1163,31 @@ int main() {
             player_position.x = glm::clamp(player_position.x, -play_area_extent, play_area_extent);
             player_position.z = glm::clamp(player_position.z, -play_area_extent, play_area_extent);
 
-            float spawn_interval = glm::max(0.6f, base_spawn_interval - player_level * 0.05f);
+            float spawn_interval = glm::max(0.5f, base_spawn_interval - player_level * 0.05f);
+            spawn_interval = glm::max(0.35f, spawn_interval - run_time * 0.01f);
             spawn_timer += delta_time;
             if (spawn_timer >= spawn_interval) {
                 spawn_timer = 0.0f;
                 spawn_enemy();
+                if (run_time >= 20.0f) {
+                    spawn_enemy();
+                }
+                if (run_time >= 60.0f && unit_dist(rng) < 0.45f) {
+                    spawn_enemy();
+                }
             }
 
-            for (Enemy& enemy : enemies) {
-                glm::vec3 to_player = player_position - enemy.position;
-                to_player.y = 0.0f;
-                float distance = glm::length(to_player);
-                if (distance > 0.001f) {
-                    glm::vec3 direction = to_player / distance;
-                    enemy.position += direction * enemy.speed * delta_time;
+            if (freeze_timer > 0.0f) {
+                freeze_timer -= delta_time;
+            } else {
+                for (Enemy& enemy : enemies) {
+                    glm::vec3 to_player = player_position - enemy.position;
+                    to_player.y = 0.0f;
+                    float distance = glm::length(to_player);
+                    if (distance > 0.001f) {
+                        glm::vec3 direction = to_player / distance;
+                        enemy.position += direction * enemy.speed * delta_time;
+                    }
                 }
             }
 
@@ -930,18 +1255,20 @@ int main() {
             }
 
             bool player_contact = false;
+            int contact_damage = 0;
             for (const Enemy& enemy : enemies) {
                 glm::vec3 delta = enemy.position - player_position;
                 delta.y = 0.0f;
                 if (glm::length(delta) <= player_contact_radius) {
                     player_contact = true;
+                    contact_damage = glm::max(contact_damage, enemy.damage);
                     break;
                 }
             }
             player_damage_timer += delta_time;
             if (player_contact && player_damage_timer >= player_damage_interval) {
                 player_damage_timer = 0.0f;
-                player_health -= 1;
+                player_health -= glm::max(1, contact_damage);
             }
 
             for (size_t i = 0; i < enemies.size();) {
@@ -949,6 +1276,16 @@ int main() {
                     gems.push_back(ExperienceGem{enemies[i].position});
                     enemies_killed += 1;
                     coins_earned += 1;
+                    float drop_roll = unit_dist(rng);
+                    if (drop_roll < 0.08f) {
+                        pickups.push_back(Pickup{enemies[i].position, PickupType::Coin});
+                    } else if (drop_roll < 0.11f) {
+                        pickups.push_back(Pickup{enemies[i].position, PickupType::Health});
+                    } else if (drop_roll < 0.125f) {
+                        pickups.push_back(Pickup{enemies[i].position, PickupType::Freeze});
+                    } else if (drop_roll < 0.13f) {
+                        pickups.push_back(Pickup{enemies[i].position, PickupType::Nuke});
+                    }
                     enemies[i] = enemies.back();
                     enemies.pop_back();
                 } else {
@@ -963,6 +1300,33 @@ int main() {
                     player_xp += 1;
                     gems[i] = gems.back();
                     gems.pop_back();
+                } else {
+                    ++i;
+                }
+            }
+
+            for (size_t i = 0; i < pickups.size();) {
+                glm::vec3 delta = pickups[i].position - player_position;
+                delta.y = 0.0f;
+                if (glm::length(delta) <= 1.1f) {
+                    switch (pickups[i].type) {
+                        case PickupType::Coin:
+                            coins_earned += 5;
+                            break;
+                        case PickupType::Health:
+                            player_health = glm::min(player_max_health, player_health + 4);
+                            break;
+                        case PickupType::Freeze:
+                            freeze_timer = 4.0f;
+                            break;
+                        case PickupType::Nuke:
+                            for (Enemy& enemy : enemies) {
+                                enemy.health = 0;
+                            }
+                            break;
+                    }
+                    pickups[i] = pickups.back();
+                    pickups.pop_back();
                 } else {
                     ++i;
                 }
@@ -1053,6 +1417,28 @@ int main() {
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glBindVertexArray(0);
 
+        if (state == GameState::Running && garlic_level > 0) {
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(ring_program);
+            glm::mat4 ring_model = glm::translate(
+                glm::mat4(1.0f),
+                player_position + glm::vec3(0.0f, 0.05f, 0.0f));
+            ring_model = glm::scale(ring_model, glm::vec3(attack_radius, 1.0f, attack_radius));
+            glm::mat4 ring_mvp = projection * view * ring_model;
+            glUniformMatrix4fv(ring_mvp_location, 1, GL_FALSE, glm::value_ptr(ring_mvp));
+            glUniform3f(ring_color_location, 0.30f, 0.95f, 0.40f);
+            float phase = attack_interval > 0.0f ? glm::clamp(attack_timer / attack_interval, 0.0f, 1.0f) : 0.0f;
+            glUniform1f(ring_phase_location, phase);
+            glBindVertexArray(ring_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBindVertexArray(0);
+            glUseProgram(program);
+            glDisable(GL_BLEND);
+            glEnable(GL_DEPTH_TEST);
+        }
+
         glm::mat4 player_model = glm::translate(
             glm::mat4(1.0f),
             player_position + glm::vec3(0.0f, 0.5f, 0.0f));
@@ -1068,16 +1454,74 @@ int main() {
         glBindVertexArray(0);
 
         for (const Enemy& enemy : enemies) {
-            glm::mat4 enemy_model = glm::translate(
-                glm::mat4(1.0f),
-                enemy.position + glm::vec3(0.0f, 0.35f, 0.0f));
-            enemy_model = glm::scale(enemy_model, glm::vec3(0.7f));
-            glm::mat4 enemy_mvp = projection * view * enemy_model;
-            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(enemy_mvp));
-            glUniform3f(color_location, 0.75f, 0.38f, 0.18f);
-            glBindVertexArray(cube_vao);
-            glDrawArrays(GL_TRIANGLES, 0, 36);
-            glBindVertexArray(0);
+            float bob = 0.08f * std::sin(run_time * 3.5f + enemy.phase);
+            glm::vec3 base_pos = enemy.position + glm::vec3(0.0f, 0.35f + bob, 0.0f);
+            glUniform3f(color_location, enemy.color.r, enemy.color.g, enemy.color.b);
+
+            if (enemy.type == 0) {
+                glm::mat4 body = glm::translate(glm::mat4(1.0f), base_pos);
+                body = glm::scale(body, glm::vec3(enemy.scale * 0.9f, enemy.scale * 0.6f, enemy.scale * 1.1f));
+                glm::mat4 body_mvp = projection * view * body;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(body_mvp));
+                glBindVertexArray(cylinder_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
+                glBindVertexArray(0);
+
+                glm::mat4 head = glm::translate(glm::mat4(1.0f), base_pos + glm::vec3(0.0f, 0.35f, 0.0f));
+                head = glm::scale(head, glm::vec3(enemy.scale * 0.45f));
+                glm::mat4 head_mvp = projection * view * head;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(head_mvp));
+                glBindVertexArray(sphere_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
+                glBindVertexArray(0);
+
+                glm::mat4 tail = glm::translate(glm::mat4(1.0f), base_pos + glm::vec3(0.0f, -0.35f, 0.0f));
+                tail = glm::scale(tail, glm::vec3(enemy.scale * 0.35f));
+                glm::mat4 tail_mvp = projection * view * tail;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(tail_mvp));
+                glBindVertexArray(sphere_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
+                glBindVertexArray(0);
+            } else if (enemy.type == 1) {
+                glm::mat4 enemy_model = glm::translate(glm::mat4(1.0f), base_pos);
+                enemy_model = glm::scale(enemy_model, glm::vec3(enemy.scale * 0.7f,
+                                                               enemy.scale * 0.45f,
+                                                               enemy.scale * 1.4f));
+                glm::mat4 enemy_mvp = projection * view * enemy_model;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(enemy_mvp));
+                glBindVertexArray(cone_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, cone_mesh.count);
+                glBindVertexArray(0);
+            } else if (enemy.type == 3) {
+                glm::mat4 stem = glm::translate(glm::mat4(1.0f), base_pos);
+                stem = glm::scale(stem, glm::vec3(enemy.scale * 0.6f,
+                                                  enemy.scale * 1.1f,
+                                                  enemy.scale * 0.6f));
+                glm::mat4 stem_mvp = projection * view * stem;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(stem_mvp));
+                glBindVertexArray(cone_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, cone_mesh.count);
+                glBindVertexArray(0);
+
+                glm::mat4 bud = glm::translate(glm::mat4(1.0f),
+                                               base_pos + glm::vec3(0.0f, 0.55f, 0.0f));
+                bud = glm::scale(bud, glm::vec3(enemy.scale * 0.35f));
+                glm::mat4 bud_mvp = projection * view * bud;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(bud_mvp));
+                glBindVertexArray(sphere_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
+                glBindVertexArray(0);
+            } else {
+                glm::mat4 enemy_model = glm::translate(glm::mat4(1.0f), base_pos);
+                enemy_model = glm::scale(enemy_model, glm::vec3(enemy.scale * 1.2f,
+                                                               enemy.scale * 1.1f,
+                                                               enemy.scale * 1.2f));
+                glm::mat4 enemy_mvp = projection * view * enemy_model;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(enemy_mvp));
+                glBindVertexArray(cube_vao);
+                glDrawArrays(GL_TRIANGLES, 0, 36);
+                glBindVertexArray(0);
+            }
         }
 
         for (const ExperienceGem& gem : gems) {
@@ -1091,6 +1535,84 @@ int main() {
             glBindVertexArray(cube_vao);
             glDrawArrays(GL_TRIANGLES, 0, 36);
             glBindVertexArray(0);
+        }
+
+        for (const Pickup& pickup : pickups) {
+            glm::vec3 color(0.85f, 0.85f, 0.2f);
+            float scale = 0.35f;
+            switch (pickup.type) {
+                case PickupType::Coin:
+                    color = glm::vec3(0.95f, 0.78f, 0.20f);
+                    scale = 0.22f;
+                    break;
+                case PickupType::Health:
+                    color = glm::vec3(0.85f, 0.20f, 0.22f);
+                    scale = 0.3f;
+                    break;
+                case PickupType::Freeze:
+                    color = glm::vec3(0.25f, 0.75f, 0.95f);
+                    scale = 0.3f;
+                    break;
+                case PickupType::Nuke:
+                    color = glm::vec3(0.95f, 0.45f, 0.10f);
+                    scale = 0.35f;
+                    break;
+            }
+            glm::mat4 pickup_model = glm::translate(
+                glm::mat4(1.0f),
+                pickup.position + glm::vec3(0.0f, 0.25f, 0.0f));
+            pickup_model = glm::scale(pickup_model, glm::vec3(scale));
+            glm::mat4 pickup_mvp = projection * view * pickup_model;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(pickup_mvp));
+            glUniform3f(color_location, color.r, color.g, color.b);
+            if (pickup.type == PickupType::Health) {
+                glBindVertexArray(cylinder_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
+                glBindVertexArray(0);
+                glm::mat4 cap = glm::translate(glm::mat4(1.0f),
+                                               pickup.position + glm::vec3(0.0f, 0.42f, 0.0f));
+                cap = glm::scale(cap, glm::vec3(scale * 0.5f));
+                glm::mat4 cap_mvp = projection * view * cap;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(cap_mvp));
+                glBindVertexArray(sphere_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
+                glBindVertexArray(0);
+            } else if (pickup.type == PickupType::Coin) {
+                float sparkle = 0.7f + 0.3f * std::sin(run_time * 4.0f + pickup.position.x * 3.0f);
+                glUniform3f(color_location, color.r * sparkle, color.g * sparkle, color.b * sparkle);
+                glm::mat4 coin = glm::scale(pickup_model, glm::vec3(1.0f, 0.22f, 1.0f));
+                glm::mat4 coin_mvp = projection * view * coin;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(coin_mvp));
+                glBindVertexArray(cylinder_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
+                glBindVertexArray(0);
+
+                glm::mat4 coin2 = glm::translate(glm::mat4(1.0f),
+                                                 pickup.position + glm::vec3(0.08f, 0.29f, 0.05f));
+                coin2 = glm::scale(coin2, glm::vec3(scale * 0.9f, scale * 0.18f, scale * 0.9f));
+                glm::mat4 coin2_mvp = projection * view * coin2;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(coin2_mvp));
+                glBindVertexArray(cylinder_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
+                glBindVertexArray(0);
+
+                glm::mat4 coin3 = glm::translate(glm::mat4(1.0f),
+                                                 pickup.position + glm::vec3(-0.06f, 0.32f, -0.04f));
+                coin3 = glm::scale(coin3, glm::vec3(scale * 0.7f, scale * 0.16f, scale * 0.7f));
+                glm::mat4 coin3_mvp = projection * view * coin3;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(coin3_mvp));
+                glBindVertexArray(cylinder_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
+                glBindVertexArray(0);
+            } else if (pickup.type == PickupType::Freeze) {
+                glBindVertexArray(sphere_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
+                glBindVertexArray(0);
+            } else if (pickup.type == PickupType::Nuke) {
+                glBindVertexArray(cone_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, cone_mesh.count);
+                glBindVertexArray(0);
+            }
         }
 
         for (const Projectile& projectile : projectiles) {
@@ -1333,6 +1855,46 @@ int main() {
             draw_text(margin + 6.0f, time_text_y,
                       "Time " + std::to_string(static_cast<int>(run_time)) + "s",
                       ui_dim, ui_projection);
+            if (freeze_timer > 0.0f) {
+                draw_text(margin + 6.0f, time_text_y + font_height + 4.0f,
+                          "Freeze " + std::to_string(static_cast<int>(std::ceil(freeze_timer))) + "s",
+                          ui_highlight, ui_projection);
+            }
+        }
+
+        if (state == GameState::Running) {
+            for (const Pickup& pickup : pickups) {
+                glm::vec3 delta = pickup.position - player_position;
+                delta.y = 0.0f;
+                if (glm::length(delta) > 6.0f) {
+                    continue;
+                }
+                glm::vec4 clip = projection * view *
+                                 glm::vec4(pickup.position + glm::vec3(0.0f, 0.7f, 0.0f), 1.0f);
+                if (clip.w <= 0.0f) {
+                    continue;
+                }
+                glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                float sx = (ndc.x * 0.5f + 0.5f) * window_width;
+                float sy = (ndc.y * 0.5f + 0.5f) * window_height;
+                std::string label;
+                switch (pickup.type) {
+                    case PickupType::Coin:
+                        label = "Coin";
+                        break;
+                    case PickupType::Health:
+                        label = "Potion";
+                        break;
+                    case PickupType::Freeze:
+                        label = "Freeze";
+                        break;
+                    case PickupType::Nuke:
+                        label = "Nuke";
+                        break;
+                }
+                draw_text_with_font(ui_font_small, sx - 14.0f, sy + 6.0f, label,
+                                    ui_white, ui_projection);
+            }
         }
 
         std::string title;
@@ -1403,11 +1965,23 @@ int main() {
     glDeleteBuffers(1, &ui_vbo);
     glDeleteVertexArrays(1, &text_vao);
     glDeleteBuffers(1, &text_vbo);
+    glDeleteVertexArrays(1, &ring_vao);
+    glDeleteBuffers(1, &ring_vbo);
+    glDeleteVertexArrays(1, &sphere_mesh.vao);
+    glDeleteBuffers(1, &sphere_mesh.vbo);
+    glDeleteVertexArrays(1, &cone_mesh.vao);
+    glDeleteBuffers(1, &cone_mesh.vbo);
+    glDeleteVertexArrays(1, &cylinder_mesh.vao);
+    glDeleteBuffers(1, &cylinder_mesh.vbo);
     glDeleteProgram(program);
     glDeleteProgram(text_program);
+    glDeleteProgram(ring_program);
 
     if (ui_font) {
         TTF_CloseFont(ui_font);
+    }
+    if (ui_font_small) {
+        TTF_CloseFont(ui_font_small);
     }
 
     SDL_GL_DeleteContext(gl_context);
