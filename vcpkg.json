@@ -1,6 +1,7 @@
 {
   "name": "vampire-diary",
   "version-string": "0.1.0",
+  "builtin-baseline": "9401ee272060dae4c80f530a04b8fbec143c8d21",
   "dependencies": [
     "sdl2",
     "glad",
