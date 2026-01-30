@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <iostream>
 #include <cmath>
@@ -20,6 +22,23 @@ struct Mesh {
     GLuint vbo = 0;
     GLsizei count = 0;
 };
+
+struct RampTile {
+    glm::vec2 center;
+    glm::vec2 half;
+    int dir; // 1:+X, 2:-X, 3:+Z, 4:-Z
+    float base_height;
+    float height;
+};
+
+struct Plateau {
+    glm::vec2 center;
+    glm::vec2 half;
+    float height;
+};
+
+static std::vector<Plateau> g_plateaus;
+static std::vector<RampTile> g_ramps;
 
 GLuint CompileShader(GLenum type, const char* source) {
     GLuint shader = glCreateShader(type);
@@ -275,95 +294,252 @@ std::vector<float> BuildCylinderVertices(int slices, float radius, float height)
     return vertices;
 }
 
-constexpr int kGridW = 10;
-constexpr int kGridH = 10;
 constexpr float kTileSize = 5.0f;
-constexpr float kLevelStep = 5.0f;
-// 0 = flat, 1 = ramp +X, 2 = ramp -X, 3 = ramp +Z, 4 = ramp -Z
-static const int kHeightMap[kGridH][kGridW] = {
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    {0, 0, 0, 1, 1, 0, 0, 0, 0, 0},
-    {0, 0, 1, 2, 2, 1, 0, 0, 0, 0},
-    {0, 0, 1, 2, 2, 1, 0, 0, 1, 1},
-    {0, 0, 1, 2, 2, 1, 0, 0, 2, 2},
-    {0, 0, 1, 2, 2, 1, 0, 0, 2, 2},
-    {0, 0, 1, 1, 1, 0, 0, 0, 1, 1},
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-};
 
-int TileLevel(int tx, int tz) {
-    if (tx < 0 || tz < 0 || tx >= kGridW || tz >= kGridH) {
-        return 0;
-    }
-    return kHeightMap[tz][tx];
+bool PointInRect(const glm::vec2& p, const glm::vec2& center, const glm::vec2& half) {
+    glm::vec2 min = center - half;
+    glm::vec2 max = center + half;
+    return p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y;
 }
 
-int RampDirAt(int tx, int tz) {
-    int level = TileLevel(tx, tz);
-    if (TileLevel(tx + 1, tz) == level + 1) {
-        return 1;
+bool IsOnRamp(const glm::vec2& p) {
+    for (const RampTile& ramp : g_ramps) {
+        if (PointInRect(p, ramp.center, ramp.half)) {
+            return true;
+        }
     }
-    if (TileLevel(tx - 1, tz) == level + 1) {
-        return 2;
+    return false;
+}
+
+bool IsOnPlateau(const glm::vec2& p) {
+    for (const Plateau& plateau : g_plateaus) {
+        if (PointInRect(p, plateau.center, plateau.half)) {
+            return true;
+        }
     }
-    if (TileLevel(tx, tz + 1) == level + 1) {
-        return 3;
+    return false;
+}
+
+const RampTile* FindRamp(const glm::vec2& p) {
+    for (const RampTile& ramp : g_ramps) {
+        if (PointInRect(p, ramp.center, ramp.half)) {
+            return &ramp;
+        }
     }
-    if (TileLevel(tx, tz - 1) == level + 1) {
-        return 4;
+    return nullptr;
+}
+
+bool IsNearRampBase(const RampTile& ramp, const glm::vec2& p, float margin) {
+    glm::vec2 min = ramp.center - ramp.half;
+    glm::vec2 max = ramp.center + ramp.half;
+    if (ramp.dir == 1) {
+        return p.x >= min.x - margin && p.x <= min.x + margin &&
+               p.y >= min.y && p.y <= max.y;
     }
-    return 0;
+    if (ramp.dir == 2) {
+        return p.x >= max.x - margin && p.x <= max.x + margin &&
+               p.y >= min.y && p.y <= max.y;
+    }
+    if (ramp.dir == 3) {
+        return p.y >= min.y - margin && p.y <= min.y + margin &&
+               p.x >= min.x && p.x <= max.x;
+    }
+    return p.y >= max.y - margin && p.y <= max.y + margin &&
+           p.x >= min.x && p.x <= max.x;
+}
+
+bool RampAllowsTransition(const glm::vec2& from, const glm::vec2& to, float margin) {
+    const RampTile* ramp_from = FindRamp(from);
+    const RampTile* ramp_to = FindRamp(to);
+    if (ramp_from && ramp_to) {
+        return ramp_from == ramp_to;
+    }
+    if (ramp_to && !ramp_from) {
+        return IsNearRampBase(*ramp_to, from, margin);
+    }
+    if (ramp_from && !ramp_to) {
+        return true;
+    }
+    return false;
+}
+
+bool IsNearRampEdge(const glm::vec2& p, float margin) {
+    for (const RampTile& ramp : g_ramps) {
+        glm::vec2 min = ramp.center - ramp.half;
+        glm::vec2 max = ramp.center + ramp.half;
+        float dx = 0.0f;
+        if (p.x < min.x) {
+            dx = min.x - p.x;
+        } else if (p.x > max.x) {
+            dx = p.x - max.x;
+        }
+        float dz = 0.0f;
+        if (p.y < min.y) {
+            dz = min.y - p.y;
+        } else if (p.y > max.y) {
+            dz = p.y - max.y;
+        }
+        if (dx <= margin && dz <= margin) {
+            return true;
+        }
+    }
+    return false;
+}
+
+float RampHeightAt(const RampTile& ramp, const glm::vec2& p) {
+    glm::vec2 min = ramp.center - ramp.half;
+    glm::vec2 max = ramp.center + ramp.half;
+    float t = 0.0f;
+    if (ramp.dir == 1) {
+        t = (p.x - min.x) / (max.x - min.x);
+    } else if (ramp.dir == 2) {
+        t = (max.x - p.x) / (max.x - min.x);
+    } else if (ramp.dir == 3) {
+        t = (p.y - min.y) / (max.y - min.y);
+    } else if (ramp.dir == 4) {
+        t = (max.y - p.y) / (max.y - min.y);
+    }
+    t = glm::clamp(t, 0.0f, 1.0f);
+    return ramp.base_height + t * ramp.height;
 }
 
 float TerrainHeight(float x, float z) {
-    float half = (kGridW * kTileSize) * 0.5f;
-    float local_x = x + half;
-    float local_z = z + half;
-    int tx = static_cast<int>(std::floor(local_x / kTileSize));
-    int tz = static_cast<int>(std::floor(local_z / kTileSize));
-    if (tx < 0 || tz < 0 || tx >= kGridW || tz >= kGridH) {
-        return 0.0f;
+    glm::vec2 p(x, z);
+    for (const RampTile& ramp : g_ramps) {
+        if (PointInRect(p, ramp.center, ramp.half)) {
+            return RampHeightAt(ramp, p);
+        }
     }
-    float base = static_cast<float>(TileLevel(tx, tz)) * kLevelStep;
-    float u = (local_x - tx * kTileSize) / kTileSize;
-    float v = (local_z - tz * kTileSize) / kTileSize;
-    int ramp = RampDirAt(tx, tz);
-    if (ramp == 1) {
-        return base + u * kLevelStep;
+    for (const Plateau& plateau : g_plateaus) {
+        if (PointInRect(p, plateau.center, plateau.half)) {
+            return plateau.height;
+        }
     }
-    if (ramp == 2) {
-        return base + (1.0f - u) * kLevelStep;
-    }
-    if (ramp == 3) {
-        return base + v * kLevelStep;
-    }
-    if (ramp == 4) {
-        return base + (1.0f - v) * kLevelStep;
-    }
+    return 0.0f;
+}
 
-    // Soft ramp bands near edges when adjacent tile is higher.
-    const float ramp_band = 0.25f;
-    float height = base;
-    int level = TileLevel(tx, tz);
-    if (TileLevel(tx + 1, tz) == level + 1 && u > 1.0f - ramp_band) {
-        float t = (u - (1.0f - ramp_band)) / ramp_band;
-        height = base + t * kLevelStep;
+float PlateauHeightAt(const glm::vec2& p) {
+    for (const Plateau& plateau : g_plateaus) {
+        if (PointInRect(p, plateau.center, plateau.half)) {
+            return plateau.height;
+        }
     }
-    if (TileLevel(tx - 1, tz) == level + 1 && u < ramp_band) {
-        float t = (ramp_band - u) / ramp_band;
-        height = base + t * kLevelStep;
+    return 0.0f;
+}
+
+float TerrainHeightAt(float x, float z, float current_y) {
+    glm::vec2 p(x, z);
+    for (const RampTile& ramp : g_ramps) {
+        if (PointInRect(p, ramp.center, ramp.half)) {
+            return RampHeightAt(ramp, p);
+        }
     }
-    if (TileLevel(tx, tz + 1) == level + 1 && v > 1.0f - ramp_band) {
-        float t = (v - (1.0f - ramp_band)) / ramp_band;
-        height = base + t * kLevelStep;
+    for (const Plateau& plateau : g_plateaus) {
+        if (PointInRect(p, plateau.center, plateau.half)) {
+            float snap_threshold = plateau.height * 0.55f;
+            if (current_y >= snap_threshold) {
+                return plateau.height;
+            }
+            return 0.0f;
+        }
     }
-    if (TileLevel(tx, tz - 1) == level + 1 && v < ramp_band) {
-        float t = (ramp_band - v) / ramp_band;
-        height = base + t * kLevelStep;
+    return 0.0f;
+}
+
+bool RectsOverlap(const glm::vec2& a_min, const glm::vec2& a_max,
+                  const glm::vec2& b_min, const glm::vec2& b_max,
+                  float pad) {
+    if (a_min.x >= b_max.x - pad || a_max.x <= b_min.x + pad) {
+        return false;
     }
-    return height;
+    if (a_min.y >= b_max.y - pad || a_max.y <= b_min.y + pad) {
+        return false;
+    }
+    return true;
+}
+
+void GenerateTerrain(uint32_t seed) {
+    g_plateaus.clear();
+    g_ramps.clear();
+
+    std::mt19937 rng(seed);
+    std::vector<glm::vec2> cells;
+    for (int gx = -2; gx <= 2; ++gx) {
+        for (int gz = -2; gz <= 2; ++gz) {
+            if (gx == 0 && gz == 0) {
+                continue;
+            }
+            cells.push_back(glm::vec2(static_cast<float>(gx), static_cast<float>(gz)));
+        }
+    }
+    std::shuffle(cells.begin(), cells.end(), rng);
+
+    const float spacing = 34.0f;
+    const int plateau_count = 8;
+    for (int i = 0; i < plateau_count && i < static_cast<int>(cells.size()); ++i) {
+        bool high = (rng() % 4) == 0;
+        float height = high ? 10.0f : 6.0f;
+        glm::vec2 half = high ? glm::vec2(11.0f, 11.0f) : glm::vec2(9.0f, 9.0f);
+        glm::vec2 center = cells[i] * spacing;
+        g_plateaus.push_back(Plateau{center, half, height});
+
+        std::array<int, 4> dirs = {1, 2, 3, 4};
+        std::shuffle(dirs.begin(), dirs.end(), rng);
+        int ramp_count = high ? 3 : 2;
+        float ramp_len = high ? 5.0f : 4.0f;
+        float ramp_w = 4.0f;
+        const float ramp_overlap = 0.35f;
+        for (int r = 0; r < ramp_count; ++r) {
+            int place_dir = dirs[r];
+            int dir = place_dir;
+            glm::vec2 ramp_half = (dir == 1 || dir == 2)
+                ? glm::vec2(ramp_len, ramp_w)
+                : glm::vec2(ramp_w, ramp_len);
+            glm::vec2 ramp_center = center;
+            if (place_dir == 1) { // place east of plateau
+                ramp_center.x += half.x + ramp_half.x - ramp_overlap;
+                dir = 2; // rise toward -X (toward plateau)
+            } else if (place_dir == 2) { // place west
+                ramp_center.x -= half.x + ramp_half.x - ramp_overlap;
+                dir = 1; // rise toward +X
+            } else if (place_dir == 3) { // place north (+Z)
+                ramp_center.y += half.y + ramp_half.y - ramp_overlap;
+                dir = 4; // rise toward -Z
+            } else { // place south (-Z)
+                ramp_center.y -= half.y + ramp_half.y - ramp_overlap;
+                dir = 3; // rise toward +Z
+            }
+
+            glm::vec2 ramp_min = ramp_center - ramp_half;
+            glm::vec2 ramp_max = ramp_center + ramp_half;
+            bool overlap = false;
+            for (const RampTile& other : g_ramps) {
+                glm::vec2 other_min = other.center - other.half;
+                glm::vec2 other_max = other.center + other.half;
+                if (RectsOverlap(ramp_min, ramp_max, other_min, other_max, 0.2f)) {
+                    overlap = true;
+                    break;
+                }
+            }
+            if (!overlap) {
+                for (const Plateau& other : g_plateaus) {
+                    if (other.center == center) {
+                        continue;
+                    }
+                    glm::vec2 other_min = other.center - other.half;
+                    glm::vec2 other_max = other.center + other.half;
+                    if (RectsOverlap(ramp_min, ramp_max, other_min, other_max, 0.2f)) {
+                        overlap = true;
+                        break;
+                    }
+                }
+            }
+            if (overlap) {
+                continue;
+            }
+            g_ramps.push_back(RampTile{ramp_center, ramp_half, dir, 0.0f, height});
+        }
+    }
 }
 
 Mesh CreateMesh(const std::vector<float>& vertices) {
@@ -377,6 +553,7 @@ Mesh CreateMesh(const std::vector<float>& vertices) {
     glEnableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
+
     mesh.count = static_cast<GLsizei>(vertices.size() / 3);
     return mesh;
 }
@@ -579,42 +756,22 @@ int main() {
     }
 
     std::vector<float> ground_vertices;
-    std::vector<glm::vec2> ground_tile_centers;
-    const int ground_steps = kGridW;
-    const float ground_extent = (kGridW * kTileSize) * 0.5f;
-    const float ground_step = kTileSize;
-    for (int x = 0; x < ground_steps; ++x) {
-        for (int z = 0; z < ground_steps; ++z) {
-            float x0 = -ground_extent + x * ground_step;
-            float x1 = x0 + ground_step;
-            float z0 = -ground_extent + z * ground_step;
-            float z1 = z0 + ground_step;
-            glm::vec3 p00(x0, TerrainHeight(x0, z0), z0);
-            glm::vec3 p10(x1, TerrainHeight(x1, z0), z0);
-            glm::vec3 p01(x0, TerrainHeight(x0, z1), z1);
-            glm::vec3 p11(x1, TerrainHeight(x1, z1), z1);
-
-            glm::vec3 tri1[3] = {p00, p11, p10};
-            glm::vec3 tri2[3] = {p00, p01, p11};
-            for (int k = 0; k < 3; ++k) {
-                ground_vertices.push_back(tri1[k].x);
-                ground_vertices.push_back(tri1[k].y);
-                ground_vertices.push_back(tri1[k].z);
-                ground_vertices.push_back(0.08f);
-                ground_vertices.push_back(0.10f);
-                ground_vertices.push_back(0.14f);
-            }
-            for (int k = 0; k < 3; ++k) {
-                ground_vertices.push_back(tri2[k].x);
-                ground_vertices.push_back(tri2[k].y);
-                ground_vertices.push_back(tri2[k].z);
-                ground_vertices.push_back(0.08f);
-                ground_vertices.push_back(0.10f);
-                ground_vertices.push_back(0.14f);
-            }
-            ground_tile_centers.push_back(glm::vec2((x0 + x1) * 0.5f, (z0 + z1) * 0.5f));
+    const float ground_extent = 95.0f;
+    auto add_quad = [&](const glm::vec3& p00, const glm::vec3& p10,
+                        const glm::vec3& p11, const glm::vec3& p01) {
+        glm::vec3 tri1[3] = {p00, p11, p10};
+        glm::vec3 tri2[3] = {p00, p01, p11};
+        for (int k = 0; k < 3; ++k) {
+            ground_vertices.push_back(tri1[k].x);
+            ground_vertices.push_back(tri1[k].y);
+            ground_vertices.push_back(tri1[k].z);
         }
-    }
+        for (int k = 0; k < 3; ++k) {
+            ground_vertices.push_back(tri2[k].x);
+            ground_vertices.push_back(tri2[k].y);
+            ground_vertices.push_back(tri2[k].z);
+        }
+    };
 
     float cube_vertices[] = {
         -0.5f, -0.5f, -0.5f,
@@ -686,14 +843,120 @@ int main() {
     glGenBuffers(1, &ground_vbo);
     glBindVertexArray(ground_vao);
     glBindBuffer(GL_ARRAY_BUFFER, ground_vbo);
-    glBufferData(GL_ARRAY_BUFFER, ground_vertices.size() * sizeof(float), ground_vertices.data(), GL_DYNAMIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
-                          reinterpret_cast<void*>(3 * sizeof(float)));
+    glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
     glEnableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
+
+    auto rebuild_ground = [&]() {
+        ground_vertices.clear();
+        add_quad(glm::vec3(-ground_extent, 0.0f, -ground_extent),
+                 glm::vec3( ground_extent, 0.0f, -ground_extent),
+                 glm::vec3( ground_extent, 0.0f,  ground_extent),
+                 glm::vec3(-ground_extent, 0.0f,  ground_extent));
+
+        for (const Plateau& plateau : g_plateaus) {
+            glm::vec2 min = plateau.center - plateau.half;
+            glm::vec2 max = plateau.center + plateau.half;
+            add_quad(glm::vec3(min.x, plateau.height, min.y),
+                     glm::vec3(max.x, plateau.height, min.y),
+                     glm::vec3(max.x, plateau.height, max.y),
+                     glm::vec3(min.x, plateau.height, max.y));
+        }
+
+        for (const RampTile& ramp : g_ramps) {
+            glm::vec2 min = ramp.center - ramp.half;
+            glm::vec2 max = ramp.center + ramp.half;
+            glm::vec2 p00(min.x, min.y);
+            glm::vec2 p10(max.x, min.y);
+            glm::vec2 p11(max.x, max.y);
+            glm::vec2 p01(min.x, max.y);
+            float h00 = RampHeightAt(ramp, p00);
+            float h10 = RampHeightAt(ramp, p10);
+            float h11 = RampHeightAt(ramp, p11);
+            float h01 = RampHeightAt(ramp, p01);
+            add_quad(glm::vec3(p00.x, h00, p00.y),
+                     glm::vec3(p10.x, h10, p10.y),
+                     glm::vec3(p11.x, h11, p11.y),
+                     glm::vec3(p01.x, h01, p01.y));
+        }
+
+        glBindBuffer(GL_ARRAY_BUFFER, ground_vbo);
+        glBufferData(GL_ARRAY_BUFFER, ground_vertices.size() * sizeof(float),
+                     ground_vertices.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    };
+
+    std::vector<float> ramp_wall_vertices;
+    GLuint ramp_wall_vao = 0;
+    GLuint ramp_wall_vbo = 0;
+    glGenVertexArrays(1, &ramp_wall_vao);
+    glGenBuffers(1, &ramp_wall_vbo);
+    glBindVertexArray(ramp_wall_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, ramp_wall_vbo);
+    glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+
+    auto rebuild_ramp_walls = [&]() {
+        ramp_wall_vertices.clear();
+        auto add_edge = [&](const glm::vec3& a, const glm::vec3& b) {
+            ramp_wall_vertices.push_back(a.x);
+            ramp_wall_vertices.push_back(a.y);
+            ramp_wall_vertices.push_back(a.z);
+            ramp_wall_vertices.push_back(b.x);
+            ramp_wall_vertices.push_back(b.y);
+            ramp_wall_vertices.push_back(b.z);
+        };
+        for (const RampTile& ramp : g_ramps) {
+            glm::vec2 min = ramp.center - ramp.half;
+            glm::vec2 max = ramp.center + ramp.half;
+            glm::vec2 p00(min.x, min.y);
+            glm::vec2 p10(max.x, min.y);
+            glm::vec2 p11(max.x, max.y);
+            glm::vec2 p01(min.x, max.y);
+            float h00 = RampHeightAt(ramp, p00);
+            float h10 = RampHeightAt(ramp, p10);
+            float h11 = RampHeightAt(ramp, p11);
+            float h01 = RampHeightAt(ramp, p01);
+            glm::vec3 v00(p00.x, h00, p00.y);
+            glm::vec3 v10(p10.x, h10, p10.y);
+            glm::vec3 v11(p11.x, h11, p11.y);
+            glm::vec3 v01(p01.x, h01, p01.y);
+
+            float base_y = ramp.base_height;
+            if (ramp.dir == 1 || ramp.dir == 2) {
+                glm::vec3 s0a(v00.x, base_y, v00.z);
+                glm::vec3 s0b(v01.x, base_y, v01.z);
+                glm::vec3 s1a(v10.x, base_y, v10.z);
+                glm::vec3 s1b(v11.x, base_y, v11.z);
+                add_edge(s0a, v00);
+                add_edge(s0b, v01);
+                add_edge(s1a, v10);
+                add_edge(s1b, v11);
+                add_edge(v00, v01);
+                add_edge(v10, v11);
+            } else {
+                glm::vec3 s0a(v00.x, base_y, v00.z);
+                glm::vec3 s0b(v10.x, base_y, v10.z);
+                glm::vec3 s1a(v01.x, base_y, v01.z);
+                glm::vec3 s1b(v11.x, base_y, v11.z);
+                add_edge(s0a, v00);
+                add_edge(s0b, v10);
+                add_edge(s1a, v01);
+                add_edge(s1b, v11);
+                add_edge(v00, v10);
+                add_edge(v01, v11);
+            }
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, ramp_wall_vbo);
+        glBufferData(GL_ARRAY_BUFFER, ramp_wall_vertices.size() * sizeof(float),
+                     ramp_wall_vertices.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    };
 
     GLuint cube_vao = 0;
     GLuint cube_vbo = 0;
@@ -796,10 +1059,12 @@ int main() {
         PickupType type;
     };
 
-    struct Obstacle {
-        glm::vec2 min;
-        glm::vec2 max;
-    };
+struct Obstacle {
+    glm::vec2 min;
+    glm::vec2 max;
+    bool is_ramp_wall = false;
+    float height = 0.0f;
+};
 
     struct Projectile {
         glm::vec3 position;
@@ -881,7 +1146,11 @@ int main() {
     float camera_yaw = glm::radians(180.0f);
     float camera_pitch = glm::radians(-20.0f);
     float camera_distance = 9.0f;
-    const float play_area_extent = 25.0f;
+    float camera_height = 0.0f;
+    bool camera_height_initialized = false;
+    uint32_t terrain_seed = 1337;
+    bool terrain_dirty = true;
+    const float play_area_extent = 90.0f;
 
     std::mt19937 rng(std::random_device{}());
     std::uniform_real_distribution<float> side_dist(0.0f, 1.0f);
@@ -921,6 +1190,7 @@ int main() {
     float freeze_timer = 0.0f;
     float nuke_flash_timer = 0.0f;
     float jump_timer = 0.0f;
+    float jump_release_timer = 0.0f;
     float jump_cooldown_timer = 0.0f;
     const float jump_duration = 0.35f;
     const float jump_cooldown = 0.8f;
@@ -928,39 +1198,74 @@ int main() {
 
     std::vector<ItemChoice> current_choices;
 
-    // Build obstacle list for city blocks.
-    const int city_half = 4;
-    const float block_size = 5.0f;
+    const int city_half = 16;
+    const float block_size = kTileSize;
     const float block_half = 1.1f;
-    obstacles.clear();
-    for (int x = -city_half; x <= city_half; ++x) {
-        for (int z = -city_half; z <= city_half; ++z) {
-            if ((x + z) % 2 != 0) {
-                continue;
-            }
-            if (x == 0 && z == 0) {
-                continue;
-            }
-            float wx = static_cast<float>(x) * block_size;
-            float wz = static_cast<float>(z) * block_size;
-            int tx = static_cast<int>(std::floor((wx + (kGridW * kTileSize) * 0.5f) / block_size));
-            int tz = static_cast<int>(std::floor((wz + (kGridH * kTileSize) * 0.5f) / block_size));
-            if (tx < 0 || tz < 0 || tx >= kGridW || tz >= kGridH) {
-                continue;
-            }
-            int ramp_type = RampDirAt(tx, tz);
-            int tile_height = TileLevel(tx, tz);
-            if (ramp_type != 0 || tile_height < 1) {
-                continue;
-            }
-            glm::vec2 center(static_cast<float>(x) * block_size,
-                             static_cast<float>(z) * block_size);
+    const float wall_thickness = 0.3f;
+    auto rebuild_obstacles = [&]() {
+        obstacles.clear();
+        for (int x = -city_half; x <= city_half; ++x) {
+            for (int z = -city_half; z <= city_half; ++z) {
+                if ((x + z) % 2 != 0) {
+                    continue;
+                }
+                if (x == 0 && z == 0) {
+                    continue;
+                }
+                glm::vec2 center(static_cast<float>(x) * block_size,
+                                 static_cast<float>(z) * block_size);
+                if (!IsOnPlateau(center) || IsOnRamp(center)) {
+                    continue;
+                }
             Obstacle box;
             box.min = center - glm::vec2(block_half, block_half);
             box.max = center + glm::vec2(block_half, block_half);
+            box.is_ramp_wall = false;
+            box.height = PlateauHeightAt(center);
             obstacles.push_back(box);
         }
     }
+    for (const RampTile& ramp : g_ramps) {
+        glm::vec2 min = ramp.center - ramp.half;
+        glm::vec2 max = ramp.center + ramp.half;
+        if (ramp.dir == 1 || ramp.dir == 2) {
+            Obstacle wall_a;
+            wall_a.min = glm::vec2(min.x, min.y - wall_thickness);
+            wall_a.max = glm::vec2(max.x, min.y + wall_thickness);
+            wall_a.is_ramp_wall = true;
+            wall_a.height = ramp.height;
+            obstacles.push_back(wall_a);
+
+            Obstacle wall_b;
+            wall_b.min = glm::vec2(min.x, max.y - wall_thickness);
+            wall_b.max = glm::vec2(max.x, max.y + wall_thickness);
+            wall_b.is_ramp_wall = true;
+            wall_b.height = ramp.height;
+            obstacles.push_back(wall_b);
+        } else {
+            Obstacle wall_a;
+            wall_a.min = glm::vec2(min.x - wall_thickness, min.y);
+            wall_a.max = glm::vec2(min.x + wall_thickness, max.y);
+            wall_a.is_ramp_wall = true;
+            wall_a.height = ramp.height;
+            obstacles.push_back(wall_a);
+
+            Obstacle wall_b;
+            wall_b.min = glm::vec2(max.x - wall_thickness, min.y);
+            wall_b.max = glm::vec2(max.x + wall_thickness, max.y);
+            wall_b.is_ramp_wall = true;
+            wall_b.height = ramp.height;
+            obstacles.push_back(wall_b);
+        }
+    }
+    };
+
+    terrain_seed = static_cast<uint32_t>(rng());
+    GenerateTerrain(terrain_seed);
+    rebuild_ground();
+    rebuild_ramp_walls();
+    rebuild_obstacles();
+    terrain_dirty = false;
 
     auto spawn_enemy = [&]() {
         float side = side_dist(rng);
@@ -1038,7 +1343,7 @@ int main() {
             type = 1;
         }
 
-        position.y = TerrainHeight(position.x, position.z);
+        position.y = TerrainHeightAt(position.x, position.z, position.y);
         if (run_time >= 90.0f && unit_dist(rng) < 0.12f) {
             elite = true;
             health += 6;
@@ -1062,6 +1367,13 @@ int main() {
     };
 
     auto start_run = [&]() {
+        if (terrain_dirty) {
+            GenerateTerrain(terrain_seed);
+            rebuild_ground();
+            rebuild_ramp_walls();
+            rebuild_obstacles();
+            terrain_dirty = false;
+        }
         enemies.clear();
         gems.clear();
         projectiles.clear();
@@ -1071,7 +1383,7 @@ int main() {
         pickups.clear();
 
         player_position = glm::vec3(0.0f, 0.0f, 0.0f);
-        player_position.y = TerrainHeight(player_position.x, player_position.z);
+        player_position.y = TerrainHeightAt(player_position.x, player_position.z, player_position.y);
         player_level = 1;
         player_xp = 0;
         player_max_health = 10 + meta_max_health_level;
@@ -1224,6 +1536,27 @@ int main() {
         glm::vec2 delta = center - closest;
         return glm::dot(delta, delta) < radius * radius;
     };
+    auto obstacle_active = [&](const Obstacle& box, float current_y) {
+        if (box.is_ramp_wall) {
+            return current_y <= box.height - 1.0f;
+        }
+        if (box.height <= 0.1f) {
+            return true;
+        }
+        return current_y >= box.height - 1.0f;
+    };
+    const float max_step_height = 1.2f;
+    const float ramp_entry_margin = 1.2f;
+    auto can_step = [&](const glm::vec2& from, const glm::vec2& to, float max_step, float current_y) {
+        float from_h = TerrainHeightAt(from.x, from.y, current_y);
+        float to_h = TerrainHeightAt(to.x, to.y, current_y);
+        if (to_h - from_h > max_step) {
+            if (!RampAllowsTransition(from, to, ramp_entry_margin)) {
+                return false;
+            }
+        }
+        return true;
+    };
 
     Uint64 last_ticks = SDL_GetPerformanceCounter();
     bool running = true;
@@ -1254,6 +1587,13 @@ int main() {
                         starter_weapon_index = (starter_weapon_index + 2) % 3;
                     } else if (key == SDLK_RIGHT || key == SDLK_d) {
                         starter_weapon_index = (starter_weapon_index + 1) % 3;
+                    } else if (key == SDLK_r) {
+                        terrain_seed = static_cast<uint32_t>(rng());
+                        GenerateTerrain(terrain_seed);
+                        rebuild_ground();
+                        rebuild_ramp_walls();
+                        rebuild_obstacles();
+                        terrain_dirty = false;
                     } else if (key == SDLK_RETURN || key == SDLK_SPACE) {
                         if (main_menu_index == 0) {
                             start_run();
@@ -1433,12 +1773,33 @@ int main() {
             glm::vec3 desired = player_position + move * player_speed * delta_time;
             desired.x = glm::clamp(desired.x, -play_area_extent, play_area_extent);
             desired.z = glm::clamp(desired.z, -play_area_extent, play_area_extent);
-            desired.y = TerrainHeight(desired.x, desired.z);
+            glm::vec2 current_xz(player_position.x, player_position.z);
+            glm::vec2 desired_xz(desired.x, desired.z);
+            desired.y = TerrainHeightAt(desired.x, desired.z, player_position.y);
 
             const float player_radius = 0.6f;
-            glm::vec2 desired_xz(desired.x, desired.z);
-            bool blocked = false;
+            float current_height = TerrainHeightAt(current_xz.x, current_xz.y, player_position.y);
+            float desired_height = TerrainHeightAt(desired_xz.x, desired_xz.y, player_position.y);
+            bool jump_active = jump_timer > 0.0f || jump_release_timer > 0.0f;
+            bool blocked = !can_step(current_xz, desired_xz, max_step_height, player_position.y);
+            if (blocked && jump_active) {
+                float jump_step_height = 8.0f;
+                bool near_edge = IsNearRampEdge(current_xz, 4.0f) || IsNearRampEdge(desired_xz, 4.0f);
+                if (desired_height <= current_height + 0.5f) {
+                    blocked = false;
+                } else if (near_edge && can_step(current_xz, desired_xz, jump_step_height, player_position.y)) {
+                    blocked = false;
+                } else if (RampAllowsTransition(current_xz, desired_xz, ramp_entry_margin)) {
+                    blocked = false;
+                }
+            }
             for (const Obstacle& box : obstacles) {
+                if (!obstacle_active(box, player_position.y)) {
+                    continue;
+                }
+                if (jump_active && box.is_ramp_wall) {
+                    continue;
+                }
                 if (circle_intersects_aabb(desired_xz, player_radius, box)) {
                     blocked = true;
                     break;
@@ -1447,14 +1808,30 @@ int main() {
                 if (!blocked) {
                     player_position.x = desired.x;
                     player_position.z = desired.z;
-                    player_position.y = glm::mix(player_position.y, desired.y, 0.25f);
                 } else {
                     glm::vec3 slide_x = player_position + glm::vec3(move.x, 0.0f, 0.0f) * player_speed * delta_time;
                     slide_x.x = glm::clamp(slide_x.x, -play_area_extent, play_area_extent);
-                    slide_x.y = TerrainHeight(slide_x.x, slide_x.z);
                     glm::vec2 slide_xz(slide_x.x, player_position.z);
-                    bool blocked_x = false;
+                    float slide_x_height = TerrainHeightAt(slide_xz.x, slide_xz.y, player_position.y);
+                    bool blocked_x = !can_step(current_xz, slide_xz, max_step_height, player_position.y);
+                    if (blocked_x && jump_active) {
+                        float jump_step_height = 8.0f;
+                        bool near_edge = IsNearRampEdge(current_xz, 4.0f) || IsNearRampEdge(slide_xz, 4.0f);
+                        if (slide_x_height <= current_height + 0.5f) {
+                            blocked_x = false;
+                        } else if (near_edge && can_step(current_xz, slide_xz, jump_step_height, player_position.y)) {
+                            blocked_x = false;
+                        } else if (RampAllowsTransition(current_xz, slide_xz, ramp_entry_margin)) {
+                            blocked_x = false;
+                        }
+                    }
                 for (const Obstacle& box : obstacles) {
+                    if (!obstacle_active(box, player_position.y)) {
+                        continue;
+                    }
+                    if (jump_timer > 0.0f && box.is_ramp_wall) {
+                        continue;
+                    }
                     if (circle_intersects_aabb(slide_xz, player_radius, box)) {
                         blocked_x = true;
                         break;
@@ -1462,15 +1839,31 @@ int main() {
                 }
                     if (!blocked_x) {
                         player_position.x = slide_x.x;
-                        player_position.y = glm::mix(player_position.y, slide_x.y, 0.25f);
                     }
 
                     glm::vec3 slide_z = player_position + glm::vec3(0.0f, 0.0f, move.z) * player_speed * delta_time;
                     slide_z.z = glm::clamp(slide_z.z, -play_area_extent, play_area_extent);
-                    slide_z.y = TerrainHeight(slide_z.x, slide_z.z);
                     glm::vec2 slide_zz(player_position.x, slide_z.z);
-                    bool blocked_z = false;
+                    float slide_z_height = TerrainHeightAt(slide_zz.x, slide_zz.y, player_position.y);
+                    bool blocked_z = !can_step(current_xz, slide_zz, max_step_height, player_position.y);
+                    if (blocked_z && jump_active) {
+                        float jump_step_height = 8.0f;
+                        bool near_edge = IsNearRampEdge(current_xz, 4.0f) || IsNearRampEdge(slide_zz, 4.0f);
+                        if (slide_z_height <= current_height + 0.5f) {
+                            blocked_z = false;
+                        } else if (near_edge && can_step(current_xz, slide_zz, jump_step_height, player_position.y)) {
+                            blocked_z = false;
+                        } else if (RampAllowsTransition(current_xz, slide_zz, ramp_entry_margin)) {
+                            blocked_z = false;
+                        }
+                    }
                 for (const Obstacle& box : obstacles) {
+                    if (!obstacle_active(box, player_position.y)) {
+                        continue;
+                    }
+                    if (jump_timer > 0.0f && box.is_ramp_wall) {
+                        continue;
+                    }
                     if (circle_intersects_aabb(slide_zz, player_radius, box)) {
                         blocked_z = true;
                         break;
@@ -1478,9 +1871,10 @@ int main() {
                 }
                     if (!blocked_z) {
                         player_position.z = slide_z.z;
-                        player_position.y = glm::mix(player_position.y, slide_z.y, 0.25f);
                     }
                 }
+                float target_y = TerrainHeightAt(player_position.x, player_position.z, player_position.y);
+                player_position.y = glm::mix(player_position.y, target_y, 0.35f);
 
             float spawn_interval = glm::max(0.5f, base_spawn_interval - player_level * 0.05f);
             spawn_interval = glm::max(0.35f, spawn_interval - run_time * 0.01f);
@@ -1507,8 +1901,12 @@ int main() {
                         glm::vec3 direction = to_player / distance;
                         glm::vec3 desired_enemy = enemy.position + direction * enemy.speed * delta_time;
                         glm::vec2 desired_enemy_xz(desired_enemy.x, desired_enemy.z);
-                        bool blocked_enemy = false;
+                        glm::vec2 enemy_xz(enemy.position.x, enemy.position.z);
+                        bool blocked_enemy = !can_step(enemy_xz, desired_enemy_xz, max_step_height, enemy.position.y);
                         for (const Obstacle& box : obstacles) {
+                                if (!obstacle_active(box, enemy.position.y)) {
+                                    continue;
+                                }
                                 if (circle_intersects_aabb(desired_enemy_xz, enemy.scale * 0.55f, box)) {
                                 blocked_enemy = true;
                                 break;
@@ -1517,15 +1915,15 @@ int main() {
                         if (!blocked_enemy) {
                             enemy.position.x = desired_enemy.x;
                             enemy.position.z = desired_enemy.z;
-                            enemy.position.y = glm::mix(enemy.position.y,
-                                                       TerrainHeight(enemy.position.x, enemy.position.z), 0.25f);
                         } else {
                             glm::vec3 slide_x = enemy.position + glm::vec3(direction.x, 0.0f, 0.0f)
                                                 * enemy.speed * delta_time;
-                            slide_x.y = TerrainHeight(slide_x.x, slide_x.z);
                             glm::vec2 slide_xz(slide_x.x, enemy.position.z);
-                            bool blocked_x = false;
+                            bool blocked_x = !can_step(enemy_xz, slide_xz, max_step_height, enemy.position.y);
                             for (const Obstacle& box : obstacles) {
+                                if (!obstacle_active(box, enemy.position.y)) {
+                                    continue;
+                                }
                                 if (circle_intersects_aabb(slide_xz, enemy.scale * 0.55f, box)) {
                                     blocked_x = true;
                                     break;
@@ -1533,31 +1931,40 @@ int main() {
                             }
                             if (!blocked_x) {
                                 enemy.position.x = slide_x.x;
-                                enemy.position.y = glm::mix(enemy.position.y, slide_x.y, 0.25f);
                             } else {
                                 glm::vec3 slide_z = enemy.position + glm::vec3(0.0f, 0.0f, direction.z)
                                                     * enemy.speed * delta_time;
-                                slide_z.y = TerrainHeight(slide_z.x, slide_z.z);
                                 glm::vec2 slide_zz(enemy.position.x, slide_z.z);
-                                bool blocked_z = false;
+                                bool blocked_z = !can_step(enemy_xz, slide_zz, max_step_height, enemy.position.y);
                                 for (const Obstacle& box : obstacles) {
-                                if (circle_intersects_aabb(slide_zz, enemy.scale * 0.55f, box)) {
+                                    if (!obstacle_active(box, enemy.position.y)) {
+                                        continue;
+                                    }
+                                    if (circle_intersects_aabb(slide_zz, enemy.scale * 0.55f, box)) {
                                         blocked_z = true;
                                         break;
                                     }
                                 }
                                 if (!blocked_z) {
                                     enemy.position.z = slide_z.z;
-                                    enemy.position.y = glm::mix(enemy.position.y, slide_z.y, 0.25f);
                                 }
                             }
                         }
+                        float enemy_target_y = TerrainHeightAt(enemy.position.x, enemy.position.z, enemy.position.y);
+                        enemy.position.y = glm::mix(enemy.position.y, enemy_target_y, 0.35f);
                     }
                 }
             }
 
+            float prev_jump_timer = jump_timer;
             if (jump_timer > 0.0f) {
                 jump_timer = glm::max(0.0f, jump_timer - delta_time);
+            }
+            if (prev_jump_timer > 0.0f && jump_timer <= 0.0f) {
+                jump_release_timer = 0.12f;
+            }
+            if (jump_release_timer > 0.0f) {
+                jump_release_timer = glm::max(0.0f, jump_release_timer - delta_time);
             }
             if (nuke_flash_timer > 0.0f) {
                 nuke_flash_timer = glm::max(0.0f, nuke_flash_timer - delta_time);
@@ -1846,64 +2253,52 @@ int main() {
             std::sin(camera_pitch),
             std::cos(camera_pitch) * std::sin(camera_yaw));
         glm::vec3 camera_pos = player_position - cam_dir * camera_distance;
-        float min_cam_y = TerrainHeight(camera_pos.x, camera_pos.z) + 1.0f;
-        if (camera_pos.y < min_cam_y) {
-            camera_pos.y = min_cam_y;
+        float min_cam_y = TerrainHeightAt(camera_pos.x, camera_pos.z, camera_pos.y) + 1.0f;
+        float target_cam_y = glm::max(camera_pos.y, min_cam_y);
+        if (!camera_height_initialized) {
+            camera_height = target_cam_y;
+            camera_height_initialized = true;
         }
+        float rise_speed = 8.0f;
+        float fall_speed = 5.0f;
+        float speed = target_cam_y > camera_height ? rise_speed : fall_speed;
+        float cam_alpha = 1.0f - std::exp(-speed * delta_time);
+        camera_height = glm::mix(camera_height, target_cam_y, cam_alpha);
+        camera_pos.y = camera_height;
         glm::mat4 view = glm::lookAt(
             camera_pos,
             player_position + glm::vec3(0.0f, jump_view_offset, 0.0f),
             glm::vec3(0.0f, 1.0f, 0.0f));
 
-        // Update ground colors based on nearby entities.
-        for (size_t i = 0; i < ground_tile_centers.size(); ++i) {
-            glm::vec2 center = ground_tile_centers[i];
-            float player_dist = glm::length(center - glm::vec2(player_position.x, player_position.z));
-            float player_glow = std::exp(-(player_dist * player_dist) / 120.0f);
-            float enemy_glow = 0.0f;
-            for (const Enemy& enemy : enemies) {
-                glm::vec2 epos(enemy.position.x, enemy.position.z);
-                float dist = glm::length(center - epos);
-                if (dist < 4.0f) {
-                    enemy_glow = glm::max(enemy_glow, 1.0f - dist / 4.0f);
-                }
-            }
-            float pulse = 0.6f + 0.4f * std::sin(run_time * 1.5f + (center.x + center.y) * 0.2f);
-            glm::vec3 base(0.12f, 0.16f, 0.12f);
-            glm::vec3 glow_color = base
-                + glm::vec3(0.08f, 0.20f, 0.10f) * player_glow
-                + glm::vec3(0.35f, 0.12f, 0.10f) * enemy_glow * pulse;
-
-            size_t vertex_index = i * 6 * 6;
-            for (int v = 0; v < 6; ++v) {
-                ground_vertices[vertex_index + v * 6 + 3] = glow_color.r;
-                ground_vertices[vertex_index + v * 6 + 4] = glow_color.g;
-                ground_vertices[vertex_index + v * 6 + 5] = glow_color.b;
-            }
-        }
-        glBindBuffer(GL_ARRAY_BUFFER, ground_vbo);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, ground_vertices.size() * sizeof(float),
-                        ground_vertices.data());
-
         glm::mat4 ground_model(1.0f);
         glm::mat4 ground_mvp = projection * view * ground_model;
         glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(ground_mvp));
-        glUniform1i(use_vertex_color_location, 1);
-        glBindVertexArray(ground_vao);
-        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(ground_vertices.size() / 6));
-        glBindVertexArray(0);
         glUniform1i(use_vertex_color_location, 0);
 
-        // Wireframe overlay for distinct triangles.
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        glLineWidth(1.0f);
-        glUniform3f(color_location, 0.10f, 0.35f, 0.18f);
-        glUniform1i(use_vertex_color_location, 0);
+        glLineWidth(1.25f);
+        glUniform3f(color_location, 0.10f, 0.75f, 0.25f);
+        glUniform1f(alpha_location, 0.55f);
         glBindVertexArray(ground_vao);
-        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(ground_vertices.size() / 6));
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(ground_vertices.size() / 3));
         glBindVertexArray(0);
+        glUniform1f(alpha_location, 1.0f);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        glDisable(GL_BLEND);
+
+        // Ramp wall wiremesh to match collision bounds.
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        glLineWidth(1.1f);
+        glUniform3f(color_location, 0.10f, 0.85f, 0.45f);
+        glUniform1f(alpha_location, 0.65f);
+        glBindVertexArray(ramp_wall_vao);
+        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(ramp_wall_vertices.size() / 3));
+        glBindVertexArray(0);
+        glUniform1f(alpha_location, 1.0f);
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         glDisable(GL_BLEND);
 
@@ -1912,8 +2307,8 @@ int main() {
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
         glLineWidth(1.5f);
-        const int city_half = 4;
-        const float block_size = 5.0f;
+        const int city_half = 6;
+        const float block_size = kTileSize;
         for (int x = -city_half; x <= city_half; ++x) {
             for (int z = -city_half; z <= city_half; ++z) {
                 if ((x + z) % 2 != 0) {
@@ -1924,17 +2319,13 @@ int main() {
                 }
                 float wx = static_cast<float>(x) * block_size;
                 float wz = static_cast<float>(z) * block_size;
-                int tx = static_cast<int>(std::floor((wx + (kGridW * kTileSize) * 0.5f) / block_size));
-                int tz = static_cast<int>(std::floor((wz + (kGridH * kTileSize) * 0.5f) / block_size));
-                int ramp_type = RampDirAt(tx, tz);
-                int tile_height = TileLevel(tx, tz);
-                if (ramp_type != 0 || tile_height < 1) {
+                glm::vec2 pos(wx, wz);
+                if (!IsOnPlateau(pos) || IsOnRamp(pos)) {
                     continue;
                 }
                 float height = 1.5f + 0.6f * static_cast<float>((x * x + z * z) % 6);
-                float base_height = TerrainHeight(wx, wz);
                 glm::vec3 base(static_cast<float>(x) * block_size,
-                               base_height + height * 0.5f,
+                               PlateauHeightAt(glm::vec2(wx, wz)) + height * 0.5f,
                                static_cast<float>(z) * block_size);
                 glm::mat4 block = glm::translate(glm::mat4(1.0f), base);
                 block = glm::scale(block, glm::vec3(block_half * 2.0f, height, block_half * 2.0f));
@@ -2388,6 +2779,10 @@ int main() {
                                "Use Left/Right to choose", ui_dim, ui_projection);
             draw_text_centered(panel_x, panel_y - 32.0f, panel_w, 24.0f,
                                "Coins: " + std::to_string(coins), ui_white, ui_projection);
+            draw_text_centered(panel_x, panel_y - 54.0f, panel_w, 18.0f,
+                               "Seed: " + std::to_string(terrain_seed), ui_dim, ui_projection);
+            draw_text_centered(panel_x, panel_y - 72.0f, panel_w, 18.0f,
+                               "Press R to reroll", ui_dim, ui_projection);
         } else if (state == GameState::PowerUps) {
             int cost_damage = 10 + 5 * meta_damage_level;
             int cost_speed = 8 + 4 * meta_speed_level;
@@ -2591,6 +2986,8 @@ int main() {
 
     glDeleteVertexArrays(1, &ground_vao);
     glDeleteBuffers(1, &ground_vbo);
+    glDeleteVertexArrays(1, &ramp_wall_vao);
+    glDeleteBuffers(1, &ramp_wall_vbo);
     glDeleteVertexArrays(1, &cube_vao);
     glDeleteBuffers(1, &cube_vbo);
     glDeleteVertexArrays(1, &ui_vao);
