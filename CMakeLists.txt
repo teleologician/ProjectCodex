@@ -24,6 +24,7 @@ find_package(glad CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(SDL2 CONFIG REQUIRED)
 find_package(SDL2_ttf CONFIG REQUIRED)
+find_package(unofficial-noise CONFIG REQUIRED)
 
 target_compile_definitions(vampire PRIVATE SDL_MAIN_HANDLED)
 target_link_libraries(vampire PRIVATE
@@ -32,5 +33,6 @@ target_link_libraries(vampire PRIVATE
     SDL2::SDL2
     SDL2::SDL2main
     SDL2_ttf::SDL2_ttf
+    unofficial::noise::noise
     OpenGL::GL
 )

@@ -15,6 +15,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <noise/noise.h>
 
 namespace {
 struct Mesh {
@@ -22,6 +23,135 @@ struct Mesh {
     GLuint vbo = 0;
     GLsizei count = 0;
 };
+
+struct MeshBuilder {
+    std::vector<glm::vec3> positions;
+
+    void add_triangle(const glm::vec3& a, const glm::vec3& b, const glm::vec3& c) {
+        positions.push_back(a);
+        positions.push_back(b);
+        positions.push_back(c);
+    }
+
+    void add_quad(const glm::vec3& a, const glm::vec3& b, const glm::vec3& c, const glm::vec3& d) {
+        add_triangle(a, b, c);
+        add_triangle(a, c, d);
+    }
+};
+
+std::vector<float> FlattenPositions(const std::vector<glm::vec3>& positions) {
+    std::vector<float> data;
+    data.reserve(positions.size() * 3);
+    for (const glm::vec3& p : positions) {
+        data.push_back(p.x);
+        data.push_back(p.y);
+        data.push_back(p.z);
+    }
+    return data;
+}
+
+glm::vec3 TransformPoint(const glm::mat4& m, const glm::vec3& p) {
+    glm::vec4 v = m * glm::vec4(p, 1.0f);
+    return glm::vec3(v);
+}
+
+void AddBox(MeshBuilder& builder, const glm::vec3& half, const glm::mat4& transform) {
+    glm::vec3 corners[8] = {
+        {-half.x, -half.y, -half.z},
+        { half.x, -half.y, -half.z},
+        { half.x,  half.y, -half.z},
+        {-half.x,  half.y, -half.z},
+        {-half.x, -half.y,  half.z},
+        { half.x, -half.y,  half.z},
+        { half.x,  half.y,  half.z},
+        {-half.x,  half.y,  half.z}
+    };
+    for (glm::vec3& c : corners) {
+        c = TransformPoint(transform, c);
+    }
+    builder.add_quad(corners[0], corners[1], corners[2], corners[3]);
+    builder.add_quad(corners[5], corners[4], corners[7], corners[6]);
+    builder.add_quad(corners[4], corners[0], corners[3], corners[7]);
+    builder.add_quad(corners[1], corners[5], corners[6], corners[2]);
+    builder.add_quad(corners[3], corners[2], corners[6], corners[7]);
+    builder.add_quad(corners[4], corners[5], corners[1], corners[0]);
+}
+
+void AddCylinder(MeshBuilder& builder, float radius, float height, int segments, const glm::mat4& transform) {
+    float half = height * 0.5f;
+    for (int i = 0; i < segments; ++i) {
+        float a0 = glm::two_pi<float>() * (static_cast<float>(i) / segments);
+        float a1 = glm::two_pi<float>() * (static_cast<float>(i + 1) / segments);
+        glm::vec3 p0(radius * std::cos(a0), -half, radius * std::sin(a0));
+        glm::vec3 p1(radius * std::cos(a1), -half, radius * std::sin(a1));
+        glm::vec3 p2(radius * std::cos(a1), half, radius * std::sin(a1));
+        glm::vec3 p3(radius * std::cos(a0), half, radius * std::sin(a0));
+        builder.add_quad(TransformPoint(transform, p0),
+                         TransformPoint(transform, p1),
+                         TransformPoint(transform, p2),
+                         TransformPoint(transform, p3));
+
+        glm::vec3 top(0.0f, half, 0.0f);
+        glm::vec3 bot(0.0f, -half, 0.0f);
+        builder.add_triangle(TransformPoint(transform, top),
+                             TransformPoint(transform, p3),
+                             TransformPoint(transform, p2));
+        builder.add_triangle(TransformPoint(transform, bot),
+                             TransformPoint(transform, p1),
+                             TransformPoint(transform, p0));
+    }
+}
+
+void AddCone(MeshBuilder& builder, float radius, float height, int segments, const glm::mat4& transform) {
+    glm::vec3 tip(0.0f, height * 0.5f, 0.0f);
+    glm::vec3 base(0.0f, -height * 0.5f, 0.0f);
+    for (int i = 0; i < segments; ++i) {
+        float a0 = glm::two_pi<float>() * (static_cast<float>(i) / segments);
+        float a1 = glm::two_pi<float>() * (static_cast<float>(i + 1) / segments);
+        glm::vec3 p0(radius * std::cos(a0), -height * 0.5f, radius * std::sin(a0));
+        glm::vec3 p1(radius * std::cos(a1), -height * 0.5f, radius * std::sin(a1));
+        builder.add_triangle(TransformPoint(transform, tip),
+                             TransformPoint(transform, p0),
+                             TransformPoint(transform, p1));
+        builder.add_triangle(TransformPoint(transform, base),
+                             TransformPoint(transform, p1),
+                             TransformPoint(transform, p0));
+    }
+}
+
+void AddSphere(MeshBuilder& builder, float radius, int rings, int segments, const glm::mat4& transform,
+               float theta_min = 0.0f, float theta_max = glm::pi<float>()) {
+    for (int y = 0; y < rings; ++y) {
+        float v0 = static_cast<float>(y) / rings;
+        float v1 = static_cast<float>(y + 1) / rings;
+        float t0 = glm::mix(theta_min, theta_max, v0);
+        float t1 = glm::mix(theta_min, theta_max, v1);
+        for (int x = 0; x < segments; ++x) {
+            float u0 = static_cast<float>(x) / segments;
+            float u1 = static_cast<float>(x + 1) / segments;
+            float p0 = u0 * glm::two_pi<float>();
+            float p1 = u1 * glm::two_pi<float>();
+            glm::vec3 a(radius * std::sin(t0) * std::cos(p0), radius * std::cos(t0), radius * std::sin(t0) * std::sin(p0));
+            glm::vec3 b(radius * std::sin(t0) * std::cos(p1), radius * std::cos(t0), radius * std::sin(t0) * std::sin(p1));
+            glm::vec3 c(radius * std::sin(t1) * std::cos(p1), radius * std::cos(t1), radius * std::sin(t1) * std::sin(p1));
+            glm::vec3 d(radius * std::sin(t1) * std::cos(p0), radius * std::cos(t1), radius * std::sin(t1) * std::sin(p0));
+            builder.add_quad(TransformPoint(transform, a),
+                             TransformPoint(transform, b),
+                             TransformPoint(transform, c),
+                             TransformPoint(transform, d));
+        }
+    }
+}
+
+void AddCapsule(MeshBuilder& builder, float radius, float height, int rings, int segments, const glm::mat4& transform) {
+    float cyl_height = glm::max(0.0f, height - radius * 2.0f);
+    glm::mat4 cyl = transform;
+    AddCylinder(builder, radius, cyl_height, segments, cyl);
+    glm::mat4 top = transform * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, cyl_height * 0.5f, 0.0f));
+    AddSphere(builder, radius, rings, segments, top, 0.0f, glm::half_pi<float>());
+    glm::mat4 bottom = transform * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -cyl_height * 0.5f, 0.0f));
+    AddSphere(builder, radius, rings, segments, bottom, glm::half_pi<float>(), glm::pi<float>());
+}
 
 struct RampTile {
     glm::vec2 center;
@@ -39,6 +169,12 @@ struct Plateau {
 
 static std::vector<Plateau> g_plateaus;
 static std::vector<RampTile> g_ramps;
+static std::vector<glm::vec3> g_rock_positions;
+static std::vector<glm::vec3> g_tree_positions;
+static constexpr float g_ground_extent = 95.0f;
+static noise::module::Perlin g_base_noise;
+static noise::module::Perlin g_detail_noise;
+static noise::module::Perlin g_rock_noise;
 
 enum class StarterWeaponId {
     Garlic,
@@ -120,6 +256,9 @@ struct SaveData {
     int unlock_poison = 0;
     int unlock_bat = 0;
     int skin_unlocked = 0;
+    int hair_style = 0;
+    int hair_color = 0;
+    int hair_unlock_mask = 1;
 };
 
 bool LoadSave(const char* path, SaveData* out) {
@@ -141,7 +280,7 @@ bool LoadSave(const char* path, SaveData* out) {
     data.speed_level = values[2];
     data.max_health_level = values[3];
     data.attack_cooldown_level = values[4];
-    if (values.size() >= 13) {
+    if (values.size() >= 16) {
         data.magnet_level = values[5];
         data.unlock_cross = values[6];
         data.unlock_stick = values[7];
@@ -150,6 +289,33 @@ bool LoadSave(const char* path, SaveData* out) {
         data.unlock_poison = values[10];
         data.unlock_bat = values[11];
         data.skin_unlocked = values[12];
+        data.hair_style = values[13];
+        data.hair_color = values[14];
+        data.hair_unlock_mask = values[15];
+    } else if (values.size() == 15) {
+        data.magnet_level = values[5];
+        data.unlock_cross = values[6];
+        data.unlock_stick = values[7];
+        data.unlock_crossbow = values[8];
+        data.unlock_holywater = values[9];
+        data.unlock_poison = values[10];
+        data.unlock_bat = values[11];
+        data.skin_unlocked = values[12];
+        data.hair_style = values[13];
+        data.hair_color = values[14];
+        data.hair_unlock_mask = 1;
+    } else if (values.size() == 14) {
+        data.magnet_level = values[5];
+        data.unlock_cross = values[6];
+        data.unlock_stick = values[7];
+        data.unlock_crossbow = values[8];
+        data.unlock_holywater = values[9];
+        data.unlock_poison = values[10];
+        data.unlock_bat = values[11];
+        data.skin_unlocked = values[12];
+        data.hair_style = values[13];
+        data.hair_color = 0;
+        data.hair_unlock_mask = 1;
     } else if (values.size() == 12) {
         data.magnet_level = values[5];
         data.unlock_cross = values[6];
@@ -211,7 +377,10 @@ void SaveProgress(const char* path, const SaveData& data) {
          << data.unlock_holywater << ' '
          << data.unlock_poison << ' '
          << data.unlock_bat << ' '
-         << data.skin_unlocked;
+         << data.skin_unlocked << ' '
+         << data.hair_style << ' '
+         << data.hair_color << ' '
+         << data.hair_unlock_mask;
 }
 
 struct TextTexture {
@@ -540,6 +709,14 @@ float RampHeightAt(const RampTile& ramp, const glm::vec2& p) {
     return ramp.base_height + t * ramp.height;
 }
 
+float BaseNoiseHeight(float x, float z) {
+    double n0 = g_base_noise.GetValue(x * 0.02, 0.0, z * 0.02);
+    double n1 = g_detail_noise.GetValue(x * 0.06, 0.0, z * 0.06);
+    float h = static_cast<float>(n0 * 1.6 + n1 * 0.4);
+    h -= std::abs(static_cast<float>(n0)) * 0.3f;
+    return h;
+}
+
 float TerrainHeight(float x, float z) {
     glm::vec2 p(x, z);
     for (const RampTile& ramp : g_ramps) {
@@ -552,7 +729,7 @@ float TerrainHeight(float x, float z) {
             return plateau.height;
         }
     }
-    return 0.0f;
+    return BaseNoiseHeight(x, z);
 }
 
 float PlateauHeightAt(const glm::vec2& p) {
@@ -577,10 +754,10 @@ float TerrainHeightAt(float x, float z, float current_y) {
             if (current_y >= snap_threshold) {
                 return plateau.height;
             }
-            return 0.0f;
+            return BaseNoiseHeight(x, z);
         }
     }
-    return 0.0f;
+    return BaseNoiseHeight(x, z);
 }
 
 bool RectsOverlap(const glm::vec2& a_min, const glm::vec2& a_max,
@@ -598,8 +775,16 @@ bool RectsOverlap(const glm::vec2& a_min, const glm::vec2& a_max,
 void GenerateTerrain(uint32_t seed) {
     g_plateaus.clear();
     g_ramps.clear();
+    g_rock_positions.clear();
+    g_tree_positions.clear();
 
     std::mt19937 rng(seed);
+    g_base_noise.SetSeed(static_cast<int>(seed));
+    g_base_noise.SetFrequency(0.015);
+    g_detail_noise.SetSeed(static_cast<int>(seed) + 17);
+    g_detail_noise.SetFrequency(0.045);
+    g_rock_noise.SetSeed(static_cast<int>(seed) + 33);
+    g_rock_noise.SetFrequency(1.2);
     std::vector<glm::vec2> cells;
     for (int gx = -2; gx <= 2; ++gx) {
         for (int gz = -2; gz <= 2; ++gz) {
@@ -676,6 +861,57 @@ void GenerateTerrain(uint32_t seed) {
             }
             g_ramps.push_back(RampTile{ramp_center, ramp_half, dir, 0.0f, height});
         }
+    }
+
+    std::uniform_real_distribution<float> dist(-g_ground_extent, g_ground_extent);
+    std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+    const int rock_count = 300;
+    const int tree_count = 200;
+    for (int i = 0; i < rock_count; ++i) {
+        glm::vec2 pos(dist(rng), dist(rng));
+        bool blocked = false;
+        for (const Plateau& plateau : g_plateaus) {
+            if (PointInRect(pos, plateau.center, plateau.half + glm::vec2(2.0f))) {
+                blocked = true;
+                break;
+            }
+        }
+        if (!blocked) {
+            for (const RampTile& ramp : g_ramps) {
+                if (PointInRect(pos, ramp.center, ramp.half + glm::vec2(1.5f))) {
+                    blocked = true;
+                    break;
+                }
+            }
+        }
+        if (blocked) {
+            continue;
+        }
+        float y = TerrainHeight(pos.x, pos.y);
+        g_rock_positions.push_back(glm::vec3(pos.x, y, pos.y));
+    }
+    for (int i = 0; i < tree_count; ++i) {
+        glm::vec2 pos(dist(rng), dist(rng));
+        bool blocked = false;
+        for (const Plateau& plateau : g_plateaus) {
+            if (PointInRect(pos, plateau.center, plateau.half + glm::vec2(2.5f))) {
+                blocked = true;
+                break;
+            }
+        }
+        if (!blocked) {
+            for (const RampTile& ramp : g_ramps) {
+                if (PointInRect(pos, ramp.center, ramp.half + glm::vec2(2.0f))) {
+                    blocked = true;
+                    break;
+                }
+            }
+        }
+        if (blocked) {
+            continue;
+        }
+        float y = TerrainHeight(pos.x, pos.y);
+        g_tree_positions.push_back(glm::vec3(pos.x, y, pos.y));
     }
 }
 
@@ -754,21 +990,63 @@ int main() {
         "layout (location = 0) in vec3 aPos;\n"
         "layout (location = 1) in vec3 aColor;\n"
         "out vec3 vColor;\n"
+        "out vec3 vNormal;\n"
         "uniform mat4 uMVP;\n"
         "uniform int uUseVertexColor;\n"
         "uniform vec3 uColor;\n"
+        "uniform int uOutlinePass;\n"
+        "uniform float uOutlineSize;\n"
         "void main() {\n"
         "    vColor = (uUseVertexColor == 1) ? aColor : uColor;\n"
-        "    gl_Position = uMVP * vec4(aPos, 1.0);\n"
+        "    vNormal = normalize(aPos);\n"
+        "    vec3 pos = aPos;\n"
+        "    if (uOutlinePass == 1) {\n"
+        "        pos += vNormal * uOutlineSize;\n"
+        "    }\n"
+        "    gl_Position = uMVP * vec4(pos, 1.0);\n"
         "}\n";
 
     const char* fragment_source =
         "#version 330 core\n"
         "in vec3 vColor;\n"
+        "in vec3 vNormal;\n"
         "out vec4 FragColor;\n"
         "uniform float uAlpha;\n"
+        "uniform vec3 uLightDir;\n"
+        "uniform float uAmbient;\n"
+        "uniform int uBands;\n"
+        "uniform vec3 uRimColor;\n"
+        "uniform float uRimPower;\n"
+        "uniform float uRimStrength;\n"
+        "uniform vec3 uOutlineColor;\n"
+        "uniform int uOutlinePass;\n"
+        "uniform float uAO;\n"
+        "uniform vec3 uFogColor;\n"
+        "uniform float uFogNear;\n"
+        "uniform float uFogFar;\n"
         "void main() {\n"
-        "    FragColor = vec4(vColor, uAlpha);\n"
+        "    if (uOutlinePass == 1) {\n"
+        "        FragColor = vec4(uOutlineColor, uAlpha);\n"
+        "        return;\n"
+        "    }\n"
+        "    vec3 normal = normalize(vNormal);\n"
+        "    vec3 lightDir = normalize(uLightDir);\n"
+        "    float light = max(dot(normal, lightDir), 0.0);\n"
+        "    if (uBands > 1) {\n"
+        "        light = floor(light * float(uBands)) / float(uBands);\n"
+        "    }\n"
+        "    float shade = uAmbient + (1.0 - uAmbient) * light;\n"
+        "    vec3 color = vColor * shade;\n"
+        "    float ao = mix(1.0, 0.7, 1.0 - clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));\n"
+        "    color *= mix(1.0, ao, uAO);\n"
+        "    float rim = pow(clamp(1.0 - abs(normal.y), 0.0, 1.0), uRimPower) * uRimStrength;\n"
+        "    color += uRimColor * rim;\n"
+        "    float spec = step(0.95, light) * 0.15;\n"
+        "    color += vec3(spec);\n"
+        "    float depth = gl_FragCoord.z;\n"
+        "    float fog = smoothstep(uFogNear, uFogFar, depth);\n"
+        "    color = mix(color, uFogColor, fog);\n"
+        "    FragColor = vec4(color, uAlpha);\n"
         "}\n";
 
     const char* text_vertex_source =
@@ -893,7 +1171,7 @@ int main() {
     }
 
     std::vector<float> ground_vertices;
-    const float ground_extent = 95.0f;
+    const float ground_extent = g_ground_extent;
     auto add_quad = [&](const glm::vec3& p00, const glm::vec3& p10,
                         const glm::vec3& p11, const glm::vec3& p01) {
         glm::vec3 tri1[3] = {p00, p11, p10};
@@ -988,10 +1266,35 @@ int main() {
 
     auto rebuild_ground = [&]() {
         ground_vertices.clear();
-        add_quad(glm::vec3(-ground_extent, 0.0f, -ground_extent),
-                 glm::vec3( ground_extent, 0.0f, -ground_extent),
-                 glm::vec3( ground_extent, 0.0f,  ground_extent),
-                 glm::vec3(-ground_extent, 0.0f,  ground_extent));
+        const float step = 2.0f;
+        for (float z = -ground_extent; z < ground_extent; z += step) {
+            for (float x = -ground_extent; x < ground_extent; x += step) {
+                glm::vec2 p(x + step * 0.5f, z + step * 0.5f);
+                bool skip = false;
+                for (const Plateau& plateau : g_plateaus) {
+                    if (PointInRect(p, plateau.center, plateau.half)) {
+                        skip = true;
+                        break;
+                    }
+                }
+                if (!skip) {
+                    for (const RampTile& ramp : g_ramps) {
+                        if (PointInRect(p, ramp.center, ramp.half)) {
+                            skip = true;
+                            break;
+                        }
+                    }
+                }
+                if (skip) {
+                    continue;
+                }
+                glm::vec3 p00(x, BaseNoiseHeight(x, z), z);
+                glm::vec3 p10(x + step, BaseNoiseHeight(x + step, z), z);
+                glm::vec3 p11(x + step, BaseNoiseHeight(x + step, z + step), z + step);
+                glm::vec3 p01(x, BaseNoiseHeight(x, z + step), z + step);
+                add_quad(p00, p10, p11, p01);
+            }
+        }
 
         for (const Plateau& plateau : g_plateaus) {
             glm::vec2 min = plateau.center - plateau.half;
@@ -1225,10 +1528,107 @@ int main() {
     Mesh cone_mesh = CreateMesh(BuildConeVertices(12, 0.5f, 1.0f));
     Mesh cylinder_mesh = CreateMesh(BuildCylinderVertices(12, 0.35f, 0.9f));
 
+    auto build_enemy_mesh = [&](int type) {
+        MeshBuilder builder;
+        glm::mat4 base = glm::mat4(1.0f);
+        if (type == 0) {
+            AddCapsule(builder, 0.35f, 0.9f, 6, 12, base);
+            glm::mat4 head = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.55f, 0.0f));
+            AddSphere(builder, 0.22f, 6, 12, head);
+        } else if (type == 1) {
+            glm::mat4 body = glm::rotate(glm::mat4(1.0f), glm::radians(-18.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+            AddCapsule(builder, 0.22f, 0.9f, 6, 12, body);
+            glm::mat4 fin_l = glm::translate(glm::mat4(1.0f), glm::vec3(-0.35f, 0.0f, -0.15f));
+            fin_l = glm::rotate(fin_l, glm::radians(65.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+            AddCone(builder, 0.18f, 0.45f, 10, fin_l);
+            glm::mat4 fin_r = glm::translate(glm::mat4(1.0f), glm::vec3(0.35f, 0.0f, -0.15f));
+            fin_r = glm::rotate(fin_r, glm::radians(-65.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+            AddCone(builder, 0.18f, 0.45f, 10, fin_r);
+        } else if (type == 2) {
+            AddBox(builder, glm::vec3(0.6f, 0.35f, 0.45f), base);
+            glm::mat4 shoulder_l = glm::translate(glm::mat4(1.0f), glm::vec3(-0.7f, 0.25f, 0.0f));
+            AddBox(builder, glm::vec3(0.25f, 0.18f, 0.3f), shoulder_l);
+            glm::mat4 shoulder_r = glm::translate(glm::mat4(1.0f), glm::vec3(0.7f, 0.25f, 0.0f));
+            AddBox(builder, glm::vec3(0.25f, 0.18f, 0.3f), shoulder_r);
+        } else {
+            glm::mat4 stem = glm::scale(glm::mat4(1.0f), glm::vec3(0.6f, 1.1f, 0.6f));
+            AddCone(builder, 0.45f, 1.2f, 12, stem);
+            glm::mat4 bud = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.65f, 0.0f));
+            AddSphere(builder, 0.28f, 6, 12, bud);
+        }
+        std::vector<float> verts = FlattenPositions(builder.positions);
+        return CreateMesh(verts);
+    };
+    Mesh enemy_meshes[4] = {build_enemy_mesh(0), build_enemy_mesh(1), build_enemy_mesh(2), build_enemy_mesh(3)};
+
+    auto build_rock_mesh = [&](int seed, int rings, int segments) {
+        MeshBuilder builder;
+        noise::module::Perlin local_noise;
+        local_noise.SetSeed(seed);
+        local_noise.SetFrequency(1.5);
+        float radius = 0.45f;
+        for (int y = 0; y < rings; ++y) {
+            float v0 = static_cast<float>(y) / rings;
+            float v1 = static_cast<float>(y + 1) / rings;
+            float t0 = v0 * glm::pi<float>();
+            float t1 = v1 * glm::pi<float>();
+            for (int x = 0; x < segments; ++x) {
+                float u0 = static_cast<float>(x) / segments;
+                float u1 = static_cast<float>(x + 1) / segments;
+                float p0 = u0 * glm::two_pi<float>();
+                float p1 = u1 * glm::two_pi<float>();
+                glm::vec3 a(radius * std::sin(t0) * std::cos(p0), radius * std::cos(t0), radius * std::sin(t0) * std::sin(p0));
+                glm::vec3 b(radius * std::sin(t0) * std::cos(p1), radius * std::cos(t0), radius * std::sin(t0) * std::sin(p1));
+                glm::vec3 c(radius * std::sin(t1) * std::cos(p1), radius * std::cos(t1), radius * std::sin(t1) * std::sin(p1));
+                glm::vec3 d(radius * std::sin(t1) * std::cos(p0), radius * std::cos(t1), radius * std::sin(t1) * std::sin(p0));
+                auto jitter = [&](glm::vec3 p) {
+                    double n = local_noise.GetValue(p.x * 2.2, p.y * 2.2, p.z * 2.2);
+                    float scale = 1.0f + static_cast<float>(n) * 0.25f;
+                    return p * scale;
+                };
+                builder.add_quad(jitter(a), jitter(b), jitter(c), jitter(d));
+            }
+        }
+        return CreateMesh(FlattenPositions(builder.positions));
+    };
+    Mesh rock_meshes[3] = {build_rock_mesh(1, 6, 10), build_rock_mesh(7, 6, 10), build_rock_mesh(13, 6, 10)};
+    Mesh rock_meshes_low[3] = {build_rock_mesh(3, 4, 6), build_rock_mesh(9, 4, 6), build_rock_mesh(15, 4, 6)};
+
+    auto build_tree_mesh = [&](bool low) {
+        MeshBuilder builder;
+        if (low) {
+            AddCylinder(builder, 0.16f, 1.0f, 6, glm::mat4(1.0f));
+            glm::mat4 crown = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.8f, 0.0f));
+            AddCone(builder, 0.5f, 1.0f, 6, crown);
+        } else {
+            AddCylinder(builder, 0.18f, 1.1f, 10, glm::mat4(1.0f));
+            glm::mat4 crown = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.9f, 0.0f));
+            AddCone(builder, 0.6f, 1.2f, 10, crown);
+            glm::mat4 crown2 = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 1.3f, 0.0f));
+            AddCone(builder, 0.45f, 0.9f, 10, crown2);
+        }
+        return CreateMesh(FlattenPositions(builder.positions));
+    };
+    Mesh tree_mesh = build_tree_mesh(false);
+    Mesh tree_mesh_low = build_tree_mesh(true);
+
     GLint mvp_location = glGetUniformLocation(program, "uMVP");
     GLint color_location = glGetUniformLocation(program, "uColor");
     GLint alpha_location = glGetUniformLocation(program, "uAlpha");
     GLint use_vertex_color_location = glGetUniformLocation(program, "uUseVertexColor");
+    GLint light_dir_location = glGetUniformLocation(program, "uLightDir");
+    GLint ambient_location = glGetUniformLocation(program, "uAmbient");
+    GLint bands_location = glGetUniformLocation(program, "uBands");
+    GLint rim_color_location = glGetUniformLocation(program, "uRimColor");
+    GLint rim_power_location = glGetUniformLocation(program, "uRimPower");
+    GLint rim_strength_location = glGetUniformLocation(program, "uRimStrength");
+    GLint outline_color_location = glGetUniformLocation(program, "uOutlineColor");
+    GLint outline_pass_location = glGetUniformLocation(program, "uOutlinePass");
+    GLint outline_size_location = glGetUniformLocation(program, "uOutlineSize");
+    GLint ao_location = glGetUniformLocation(program, "uAO");
+    GLint fog_color_location = glGetUniformLocation(program, "uFogColor");
+    GLint fog_near_location = glGetUniformLocation(program, "uFogNear");
+    GLint fog_far_location = glGetUniformLocation(program, "uFogFar");
     GLint text_mvp_location = glGetUniformLocation(text_program, "uMVP");
     GLint text_tint_location = glGetUniformLocation(text_program, "uTint");
     GLint text_texture_location = glGetUniformLocation(text_program, "uTexture");
@@ -1243,6 +1643,12 @@ int main() {
         std::cerr << "Failed to load a UI font (try adding one in assets/)." << std::endl;
     }
 
+    const glm::vec3 palette_neutral(0.18f, 0.55f, 0.70f);
+    const glm::vec3 palette_outline(0.06f, 0.08f, 0.12f);
+    const glm::vec3 palette_rim(0.25f, 0.85f, 0.95f);
+    const glm::vec3 palette_fog(0.04f, 0.05f, 0.08f);
+    const glm::vec3 palette_light_dir = glm::normalize(glm::vec3(-0.3f, 0.9f, 0.2f));
+
     struct Enemy {
         glm::vec3 position;
         float speed;
@@ -1253,6 +1659,7 @@ int main() {
         float phase;
         int type;
         bool elite;
+        float hit_flash = 0.0f;
     };
 
     struct ExperienceGem {
@@ -1343,6 +1750,18 @@ struct Obstacle {
         float radius;
     };
 
+    struct SpawnPoof {
+        glm::vec3 position;
+        float timer = 0.0f;
+        float duration = 0.6f;
+    };
+
+    struct CaptureWave {
+        glm::vec3 position;
+        float timer = 0.0f;
+        float duration = 0.8f;
+    };
+
     enum class GroundEffectType {
         Holy,
         Poison
@@ -1390,6 +1809,7 @@ struct Obstacle {
     enum class GameState {
         MainMenu,
         PowerUps,
+        Customization,
         Running,
         Paused,
         LevelUp,
@@ -1414,10 +1834,27 @@ struct Obstacle {
     bool unlock_bat = save_data.unlock_bat != 0;
     bool skin_unlocked = save_data.skin_unlocked != 0;
     bool skin_selected = skin_unlocked;
+    int hair_style = save_data.hair_style;
+    int hair_color = save_data.hair_color;
+    int hair_unlock_mask = save_data.hair_unlock_mask == 0 ? 1 : save_data.hair_unlock_mask;
 
     int main_menu_index = 0;
     int starter_weapon_index = 0;
     int powerup_menu_index = 0;
+    int customize_menu_index = 0;
+    constexpr int kHairStyleCount = 3;
+    const char* hair_style_names[kHairStyleCount] = {"Mohawk", "Roman Crest", "Spikes"};
+    const int hair_style_costs[kHairStyleCount] = {0, 80, 120};
+    const glm::vec3 hair_colors[] = {
+        glm::vec3(0.95f, 0.55f, 0.15f),
+        glm::vec3(0.25f, 0.95f, 0.85f),
+        glm::vec3(0.85f, 0.25f, 0.95f),
+        glm::vec3(0.95f, 0.85f, 0.20f),
+        glm::vec3(0.15f, 0.95f, 0.45f)
+    };
+    const int hair_color_count = static_cast<int>(sizeof(hair_colors) / sizeof(hair_colors[0]));
+    hair_style = (hair_style % kHairStyleCount + kHairStyleCount) % kHairStyleCount;
+    hair_color = (hair_color % hair_color_count + hair_color_count) % hair_color_count;
     GameState state = GameState::MainMenu;
     bool victory = false;
     float game_over_timer = 0.0f;
@@ -1428,6 +1865,7 @@ struct Obstacle {
 
     glm::vec3 player_position(0.0f, 0.0f, 0.0f);
     glm::vec3 player_velocity(0.0f, 0.0f, 0.0f);
+    float player_move_amount = 0.0f;
     int player_level = 1;
     int player_xp = 0;
     int player_health = 10;
@@ -1455,6 +1893,8 @@ struct Obstacle {
     std::vector<Projectile> projectiles;
     std::vector<Bomb> bombs;
     std::vector<Explosion> explosions;
+    std::vector<SpawnPoof> spawn_poofs;
+    std::vector<CaptureWave> capture_waves;
     std::vector<GroundEffect> ground_effects;
     std::vector<Pickup> pickups;
     std::vector<Building> buildings;
@@ -1470,6 +1910,7 @@ struct Obstacle {
     int attack_damage = 1;
     float player_damage_timer = 0.0f;
     const float player_damage_interval = 0.7f;
+    float player_hurt_timer = 0.0f;
     const float player_contact_radius = 0.9f;
 
     int garlic_level = 1;
@@ -1702,7 +2143,8 @@ struct Obstacle {
         }
 
         float phase = unit_dist(rng) * glm::two_pi<float>();
-        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite});
+        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite, 0.0f});
+        spawn_poofs.push_back(SpawnPoof{position, 0.0f, 0.5f});
     };
 
     auto spawn_enemy_at = [&](const glm::vec3& origin, int health_mult, const glm::vec3& color_override, bool force_elite) {
@@ -1787,7 +2229,8 @@ struct Obstacle {
         }
 
         float phase = unit_dist(rng) * glm::two_pi<float>();
-        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite});
+        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite, 0.0f});
+        spawn_poofs.push_back(SpawnPoof{position, 0.0f, 0.5f});
     };
 
     auto assign_enemy_spawners = [&](int count) {
@@ -1882,6 +2325,9 @@ struct Obstacle {
         save_data.unlock_poison = unlock_poison ? 1 : 0;
         save_data.unlock_bat = unlock_bat ? 1 : 0;
         save_data.skin_unlocked = skin_unlocked ? 1 : 0;
+        save_data.hair_style = hair_style;
+        save_data.hair_color = hair_color;
+        save_data.hair_unlock_mask = hair_unlock_mask;
         SaveProgress(save_path, save_data);
     };
 
@@ -1910,6 +2356,8 @@ struct Obstacle {
         projectiles.clear();
         bombs.clear();
         explosions.clear();
+        spawn_poofs.clear();
+        capture_waves.clear();
         current_choices.clear();
         pickups.clear();
         allies.clear();
@@ -2153,9 +2601,9 @@ struct Obstacle {
                 SDL_Keycode key = event.key.keysym.sym;
                 if (state == GameState::MainMenu) {
                     if (key == SDLK_UP || key == SDLK_w) {
-                        main_menu_index = (main_menu_index + 2) % 3;
+                        main_menu_index = (main_menu_index + 3) % 4;
                     } else if (key == SDLK_DOWN || key == SDLK_s) {
-                        main_menu_index = (main_menu_index + 1) % 3;
+                        main_menu_index = (main_menu_index + 1) % 4;
                     } else if (key == SDLK_LEFT || key == SDLK_a) {
                         auto starters = build_starter_weapons();
                         int count = static_cast<int>(starters.size());
@@ -2179,8 +2627,48 @@ struct Obstacle {
                         } else if (main_menu_index == 1) {
                             powerup_menu_index = 0;
                             state = GameState::PowerUps;
+                        } else if (main_menu_index == 2) {
+                            customize_menu_index = 0;
+                            state = GameState::Customization;
                         } else {
                             running = false;
+                        }
+                    }
+                } else if (state == GameState::Customization) {
+                    if (key == SDLK_UP || key == SDLK_w) {
+                        customize_menu_index = (customize_menu_index + 2) % 3;
+                    } else if (key == SDLK_DOWN || key == SDLK_s) {
+                        customize_menu_index = (customize_menu_index + 1) % 3;
+                    } else if (key == SDLK_LEFT || key == SDLK_a) {
+                        if (customize_menu_index == 0) {
+                            hair_style = (hair_style + kHairStyleCount - 1) % kHairStyleCount;
+                        } else if (customize_menu_index == 1) {
+                            hair_color = (hair_color + hair_color_count - 1) % hair_color_count;
+                        }
+                    } else if (key == SDLK_RIGHT || key == SDLK_d) {
+                        if (customize_menu_index == 0) {
+                            hair_style = (hair_style + 1) % kHairStyleCount;
+                        } else if (customize_menu_index == 1) {
+                            hair_color = (hair_color + 1) % hair_color_count;
+                        }
+                    } else if (key == SDLK_ESCAPE) {
+                        save_progress();
+                        state = GameState::MainMenu;
+                    } else if (key == SDLK_RETURN || key == SDLK_SPACE) {
+                        if (customize_menu_index == 0) {
+                            int cost = hair_style_costs[hair_style];
+                            int mask = 1 << hair_style;
+                            if ((hair_unlock_mask & mask) != 0) {
+                                save_progress();
+                            } else if (coins >= cost) {
+                                coins -= cost;
+                                hair_unlock_mask |= mask;
+                                save_progress();
+                            }
+                        } else if (customize_menu_index == 1) {
+                            save_progress();
+                        } else if (customize_menu_index == 2) {
+                            state = GameState::MainMenu;
                         }
                     }
                 } else if (state == GameState::PowerUps) {
@@ -2423,12 +2911,16 @@ struct Obstacle {
             } else if (event.type == SDL_MOUSEMOTION && state == GameState::Running) {
                 const float sensitivity = 0.0018f;
                 camera_yaw += static_cast<float>(event.motion.xrel) * sensitivity;
-                camera_pitch += static_cast<float>(event.motion.yrel) * sensitivity;
+                camera_pitch -= static_cast<float>(event.motion.yrel) * sensitivity;
                 camera_pitch = glm::clamp(camera_pitch, glm::radians(-45.0f), glm::radians(10.0f));
             } else if (event.type == SDL_MOUSEWHEEL && state == GameState::Running) {
                 camera_distance -= static_cast<float>(event.wheel.y) * 0.6f;
                 camera_distance = glm::clamp(camera_distance, 4.0f, 16.0f);
             }
+        }
+
+        if (state != GameState::Running) {
+            player_move_amount = 0.0f;
         }
 
         if (state == GameState::Running) {
@@ -2455,10 +2947,14 @@ struct Obstacle {
                 std::cos(camera_yaw), 0.0f, std::sin(camera_yaw)));
             glm::vec3 right = glm::normalize(glm::vec3(-forward.z, 0.0f, forward.x));
             glm::vec3 move = input.x * right + input.z * forward;
-            if (glm::length(move) > 0.0f) {
+            float move_len = glm::length(move);
+            if (move_len > 0.0f) {
                 move = glm::normalize(move);
+                player_aim_dir = move;
+            } else {
+                player_aim_dir = forward;
             }
-            player_aim_dir = forward;
+            player_move_amount = glm::clamp(move_len, 0.0f, 1.0f);
             if (jump_cooldown_timer > 0.0f) {
                 jump_cooldown_timer = glm::max(0.0f, jump_cooldown_timer - delta_time);
             }
@@ -2650,6 +3146,8 @@ struct Obstacle {
                         building.alive_timer = 0.0f;
                         building.max_health = 10;
                         building.health = building.max_health;
+                        capture_waves.push_back(
+                            CaptureWave{glm::vec3(building.center.x, building.base_height + 0.05f, building.center.y), 0.0f, 0.8f});
                         rebuild_obstacles();
                     }
                 }
@@ -2985,6 +3483,19 @@ struct Obstacle {
             if (stick_flash_timer > 0.0f) {
                 stick_flash_timer = glm::max(0.0f, stick_flash_timer - delta_time);
             }
+            if (player_hurt_timer > 0.0f) {
+                player_hurt_timer = glm::max(0.0f, player_hurt_timer - delta_time);
+            }
+            for (Enemy& enemy : enemies) {
+                if (enemy.hit_flash > 0.0f) {
+                    enemy.hit_flash = glm::max(0.0f, enemy.hit_flash - delta_time);
+                }
+            }
+
+            auto damage_enemy = [&](Enemy& enemy, int dmg) {
+                enemy.health -= dmg;
+                enemy.hit_flash = 0.12f;
+            };
 
             if (garlic_level > 0) {
                 attack_timer += delta_time;
@@ -2993,7 +3504,7 @@ struct Obstacle {
                     for (Enemy& enemy : enemies) {
                         glm::vec3 delta = enemy.position - player_position;
                         if (glm::length(delta) <= attack_radius) {
-                            enemy.health -= attack_damage;
+                            damage_enemy(enemy, attack_damage);
                         }
                     }
                     for (Building& building : buildings) {
@@ -3118,7 +3629,7 @@ struct Obstacle {
                     if (dist <= stick_range && dy <= 1.2f) {
                         glm::vec3 dir = glm::normalize(glm::vec3(delta.x, 0.0f, delta.z));
                         if (glm::dot(dir, forward) >= cos_half) {
-                            enemy.health -= stick_damage;
+                            damage_enemy(enemy, stick_damage);
                         }
                     }
                 }
@@ -3133,7 +3644,7 @@ struct Obstacle {
                     for (Enemy& enemy : enemies) {
                         glm::vec3 delta = enemy.position - orb;
                         if (glm::length(delta) <= cross_hit_radius) {
-                            enemy.health -= cross_damage;
+                            damage_enemy(enemy, cross_damage);
                         }
                     }
                 }
@@ -3173,7 +3684,7 @@ struct Obstacle {
                         glm::vec3 delta = enemy.position - bombs[i].position;
                         delta.y = 0.0f;
                         if (glm::length(delta) <= bomb_radius) {
-                            enemy.health -= bomb_damage;
+                            damage_enemy(enemy, bomb_damage);
                         }
                     }
                     for (Building& building : buildings) {
@@ -3213,7 +3724,7 @@ struct Obstacle {
                 for (Enemy& enemy : enemies) {
                     glm::vec3 delta = enemy.position - projectiles[i].position;
                     if (glm::length(delta) <= 0.6f) {
-                        enemy.health -= projectiles[i].damage;
+                        damage_enemy(enemy, projectiles[i].damage);
                         hit = true;
                         break;
                     }
@@ -3262,6 +3773,7 @@ struct Obstacle {
             if (jump_timer <= 0.0f && player_contact && player_damage_timer >= player_damage_interval) {
                 player_damage_timer = 0.0f;
                 player_health -= glm::max(1, contact_damage);
+                player_hurt_timer = 0.25f;
             }
 
             for (size_t i = 0; i < enemies.size();) {
@@ -3342,6 +3854,26 @@ struct Obstacle {
                 }
             }
 
+            for (size_t i = 0; i < spawn_poofs.size();) {
+                spawn_poofs[i].timer += delta_time;
+                if (spawn_poofs[i].timer >= spawn_poofs[i].duration) {
+                    spawn_poofs[i] = spawn_poofs.back();
+                    spawn_poofs.pop_back();
+                } else {
+                    ++i;
+                }
+            }
+
+            for (size_t i = 0; i < capture_waves.size();) {
+                capture_waves[i].timer += delta_time;
+                if (capture_waves[i].timer >= capture_waves[i].duration) {
+                    capture_waves[i] = capture_waves.back();
+                    capture_waves.pop_back();
+                } else {
+                    ++i;
+                }
+            }
+
             for (size_t i = 0; i < ground_effects.size();) {
                 GroundEffect& effect = ground_effects[i];
                 effect.timer += delta_time;
@@ -3351,7 +3883,7 @@ struct Obstacle {
                     for (Enemy& enemy : enemies) {
                         glm::vec3 delta = enemy.position - effect.position;
                         if (glm::length(delta) <= effect.radius) {
-                            enemy.health -= effect.damage;
+                            damage_enemy(enemy, effect.damage);
                         }
                     }
                 }
@@ -3463,6 +3995,20 @@ struct Obstacle {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         glUseProgram(program);
+        glUniform1i(use_vertex_color_location, 0);
+        glUniform3f(light_dir_location, palette_light_dir.x, palette_light_dir.y, palette_light_dir.z);
+        glUniform1f(ambient_location, 0.35f);
+        glUniform1i(bands_location, 3);
+        glUniform3f(rim_color_location, palette_rim.x, palette_rim.y, palette_rim.z);
+        glUniform1f(rim_power_location, 2.0f);
+        glUniform1f(rim_strength_location, 0.45f);
+        glUniform3f(outline_color_location, palette_outline.x, palette_outline.y, palette_outline.z);
+        glUniform1i(outline_pass_location, 0);
+        glUniform1f(outline_size_location, 0.045f);
+        glUniform1f(ao_location, 0.6f);
+        glUniform3f(fog_color_location, palette_fog.x, palette_fog.y, palette_fog.z);
+        glUniform1f(fog_near_location, 0.995f);
+        glUniform1f(fog_far_location, 1.0f);
 
         glm::mat4 projection = glm::perspective(
             glm::radians(60.0f),
@@ -3547,6 +4093,36 @@ struct Obstacle {
         glUniform1f(alpha_location, 1.0f);
         glDisable(GL_BLEND);
 
+        // Procedural rocks and trees (non-colliding props).
+        for (const glm::vec3& pos : g_rock_positions) {
+            int mesh_index = static_cast<int>(std::abs(g_rock_noise.GetValue(pos.x * 0.3, 0.0, pos.z * 0.3)) * 3.0) % 3;
+            float scale = 0.6f + 0.4f * static_cast<float>(std::abs(g_rock_noise.GetValue(pos.x * 0.1, 1.0, pos.z * 0.1)));
+            glm::mat4 rock = glm::translate(glm::mat4(1.0f), pos + glm::vec3(0.0f, 0.2f, 0.0f));
+            rock = glm::scale(rock, glm::vec3(scale));
+            glm::mat4 rock_mvp = projection * view * rock;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(rock_mvp));
+            glUniform3f(color_location, 0.45f, 0.42f, 0.38f);
+            float dist = glm::length(glm::vec2(camera_pos.x - pos.x, camera_pos.z - pos.z));
+            const Mesh& rock_mesh = dist > 60.0f ? rock_meshes_low[mesh_index] : rock_meshes[mesh_index];
+            glBindVertexArray(rock_mesh.vao);
+            glDrawArrays(GL_TRIANGLES, 0, rock_mesh.count);
+            glBindVertexArray(0);
+        }
+
+        for (const glm::vec3& pos : g_tree_positions) {
+            float scale = 0.8f + 0.4f * static_cast<float>(std::abs(g_rock_noise.GetValue(pos.x * 0.05, 2.0, pos.z * 0.05)));
+            glm::mat4 tree = glm::translate(glm::mat4(1.0f), pos + glm::vec3(0.0f, 0.55f * scale, 0.0f));
+            tree = glm::scale(tree, glm::vec3(scale));
+            glm::mat4 tree_mvp = projection * view * tree;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(tree_mvp));
+            glUniform3f(color_location, 0.20f, 0.55f, 0.28f);
+            float dist = glm::length(glm::vec2(camera_pos.x - pos.x, camera_pos.z - pos.z));
+            const Mesh& mesh = dist > 70.0f ? tree_mesh_low : tree_mesh;
+            glBindVertexArray(mesh.vao);
+            glDrawArrays(GL_TRIANGLES, 0, mesh.count);
+            glBindVertexArray(0);
+        }
+
         // City blocks (wireframe skyline so enemies remain visible)
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -3560,21 +4136,21 @@ struct Obstacle {
             block = glm::scale(block, glm::vec3(building.size, building.height, building.size));
             glm::mat4 block_mvp = projection * view * block;
             glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(block_mvp));
-            glm::vec3 color(0.20f, 0.75f, 0.95f);
+            glm::vec3 color(0.18f, 0.55f, 0.70f);
             if (building.owner == BuildingOwner::Enemy && building.spawner) {
-                if (building.alive_timer >= 120.0f) {
-                    color = glm::vec3(0.95f, 0.85f, 0.30f);
-                } else {
-                    color = glm::vec3(0.95f, 0.25f, 0.25f);
-                }
+                float danger_pulse = 0.6f + 0.4f * std::sin(run_time * 4.0f + building.center.x * 0.12f);
+                glm::vec3 danger = building.alive_timer >= 120.0f
+                    ? glm::vec3(1.0f, 0.65f, 0.10f)
+                    : glm::vec3(1.0f, 0.15f, 0.20f);
+                color = glm::mix(color, danger, danger_pulse);
             } else if (building.owner == BuildingOwner::Player) {
                 if (building.veteran_timer >= 60.0f) {
-                    color = glm::vec3(0.75f, 0.35f, 0.95f);
+                    color = glm::mix(color, glm::vec3(0.75f, 0.35f, 0.95f), 0.65f);
                 } else {
-                    color = glm::vec3(0.25f, 0.95f, 0.45f);
+                    color = glm::mix(color, glm::vec3(0.25f, 0.95f, 0.45f), 0.6f);
                 }
             }
-            float glow = 0.55f + 0.45f * std::sin(run_time * 1.5f + building.center.x * 0.05f);
+            float glow = 0.6f + 0.4f * std::sin(run_time * 1.5f + building.center.x * 0.05f);
             glUniform3f(color_location, color.r * glow, color.g * glow, color.b * glow);
             glBindVertexArray(cube_vao);
             glDrawArrays(GL_TRIANGLES, 0, 36);
@@ -3639,6 +4215,77 @@ struct Obstacle {
             glEnable(GL_DEPTH_TEST);
         }
 
+        if (!spawn_poofs.empty()) {
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(ring_program);
+            for (const SpawnPoof& poof : spawn_poofs) {
+                float t = glm::clamp(poof.timer / poof.duration, 0.0f, 1.0f);
+                glm::mat4 ring_model = glm::translate(glm::mat4(1.0f),
+                                                     poof.position + glm::vec3(0.0f, 0.05f, 0.0f));
+                ring_model = glm::scale(ring_model, glm::vec3(0.6f + 1.6f * t, 1.0f, 0.6f + 1.6f * t));
+                glm::mat4 ring_mvp = projection * view * ring_model;
+                glUniformMatrix4fv(ring_mvp_location, 1, GL_FALSE, glm::value_ptr(ring_mvp));
+                glUniform3f(ring_color_location, 0.85f, 0.45f, 0.95f);
+                glUniform1f(ring_phase_location, t);
+                glUniform1f(ring_alpha_location, 0.6f * (1.0f - t));
+                glBindVertexArray(ring_vao);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+                glBindVertexArray(0);
+            }
+            glUseProgram(program);
+            glDisable(GL_BLEND);
+            glEnable(GL_DEPTH_TEST);
+        }
+
+        if (!capture_waves.empty()) {
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(ring_program);
+            for (const CaptureWave& wave : capture_waves) {
+                float t = glm::clamp(wave.timer / wave.duration, 0.0f, 1.0f);
+                glm::mat4 ring_model = glm::translate(glm::mat4(1.0f),
+                                                     wave.position + glm::vec3(0.0f, 0.05f, 0.0f));
+                ring_model = glm::scale(ring_model, glm::vec3(1.2f + 2.8f * t, 1.0f, 1.2f + 2.8f * t));
+                glm::mat4 ring_mvp = projection * view * ring_model;
+                glUniformMatrix4fv(ring_mvp_location, 1, GL_FALSE, glm::value_ptr(ring_mvp));
+                glUniform3f(ring_color_location, 0.25f, 0.95f, 0.65f);
+                glUniform1f(ring_phase_location, t);
+                glUniform1f(ring_alpha_location, 0.7f * (1.0f - t));
+                glBindVertexArray(ring_vao);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+                glBindVertexArray(0);
+            }
+            glUseProgram(program);
+            glDisable(GL_BLEND);
+            glEnable(GL_DEPTH_TEST);
+        }
+
+        if (state == GameState::Running && garlic_level == 0) {
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(ring_program);
+            glm::mat4 hover_model = glm::translate(
+                glm::mat4(1.0f),
+                player_position + glm::vec3(0.0f, 0.04f, 0.0f));
+            hover_model = glm::scale(hover_model, glm::vec3(1.2f, 1.0f, 1.2f));
+            glm::mat4 hover_mvp = projection * view * hover_model;
+            glUniformMatrix4fv(ring_mvp_location, 1, GL_FALSE, glm::value_ptr(hover_mvp));
+            glUniform3f(ring_color_location, 0.15f, 0.85f, 0.95f);
+            float phase = 0.4f + 0.3f * std::sin(run_time * 2.0f);
+            glUniform1f(ring_phase_location, phase);
+            glUniform1f(ring_alpha_location, 0.45f);
+            glBindVertexArray(ring_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBindVertexArray(0);
+            glUseProgram(program);
+            glDisable(GL_BLEND);
+            glEnable(GL_DEPTH_TEST);
+        }
+
         glm::vec3 player_color = skin_selected
             ? glm::vec3(0.35f, 0.20f, 0.85f)
             : glm::vec3(0.95f, 0.55f, 0.10f);
@@ -3647,40 +4294,158 @@ struct Obstacle {
         float jump_phase = jump_timer > 0.0f ? (jump_duration - jump_timer) / jump_duration : 0.0f;
         float jump_offset = jump_timer > 0.0f ? std::sin(jump_phase * glm::pi<float>()) * jump_height : 0.0f;
         glm::vec3 base_pos = player_position + glm::vec3(0.0f, 0.35f + jump_offset, 0.0f);
-        float player_yaw = camera_yaw;
+        float player_yaw = camera_yaw + glm::half_pi<float>();
+        player_yaw += glm::pi<float>();
         glm::mat4 base_transform = glm::translate(glm::mat4(1.0f), base_pos);
         base_transform = glm::rotate(base_transform, player_yaw, glm::vec3(0.0f, 1.0f, 0.0f));
         glm::mat4 body = base_transform;
-        body = glm::scale(body, glm::vec3(0.9f, 0.6f, 1.1f));
+        body = glm::scale(body, glm::vec3(0.75f, 1.15f, 0.75f));
         glm::mat4 body_mvp = projection * view * body;
+        glm::mat4 head = base_transform * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.28f, 0.0f));
+        head = glm::scale(head, glm::vec3(0.32f));
+        glm::mat4 head_mvp = projection * view * head;
+
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_FRONT);
+        glUniform1i(outline_pass_location, 1);
+        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(body_mvp));
+        glBindVertexArray(cylinder_mesh.vao);
+        glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
+        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(head_mvp));
+        glBindVertexArray(sphere_mesh.vao);
+        glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
+        glBindVertexArray(0);
+        glUniform1i(outline_pass_location, 0);
+        glCullFace(GL_BACK);
+        glDisable(GL_CULL_FACE);
+
         glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(body_mvp));
         glBindVertexArray(cylinder_mesh.vao);
         glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
         glBindVertexArray(0);
-
-        glm::mat4 head = base_transform * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.35f, 0.0f));
-        head = glm::scale(head, glm::vec3(0.45f));
-        glm::mat4 head_mvp = projection * view * head;
         glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(head_mvp));
         glBindVertexArray(sphere_mesh.vao);
         glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
         glBindVertexArray(0);
 
-        glm::mat4 tail = base_transform * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -0.35f, 0.0f));
-        tail = glm::scale(tail, glm::vec3(0.35f));
-        glm::mat4 tail_mvp = projection * view * tail;
-        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(tail_mvp));
+        glm::mat4 cloak = base_transform * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.12f, -0.15f));
+        cloak = glm::rotate(cloak, glm::radians(-6.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        cloak = glm::scale(cloak, glm::vec3(0.75f, 0.85f, 0.6f));
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glUniform1f(alpha_location, 0.55f);
+        glm::mat4 cloak_glow = cloak;
+        cloak_glow = glm::scale(cloak_glow, glm::vec3(1.06f, 1.04f, 1.06f));
+        glm::mat4 cloak_glow_mvp = projection * view * cloak_glow;
+        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(cloak_glow_mvp));
+        glUniform3f(color_location, 0.15f, 0.85f, 0.95f);
+        glBindVertexArray(cone_mesh.vao);
+        glDrawArrays(GL_TRIANGLES, 0, cone_mesh.count);
+        glm::mat4 cloak_mvp = projection * view * cloak;
+        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(cloak_mvp));
+        glUniform3f(color_location, 0.10f, 0.10f, 0.16f);
+        glDrawArrays(GL_TRIANGLES, 0, cone_mesh.count);
+        glBindVertexArray(0);
+        glUniform1f(alpha_location, 1.0f);
+        glDisable(GL_BLEND);
+
+        glm::mat4 helmet = base_transform * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.55f, 0.0f));
+        helmet = glm::scale(helmet, glm::vec3(0.38f, 0.32f, 0.38f));
+        glm::mat4 helmet_mvp = projection * view * helmet;
+        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(helmet_mvp));
+        glUniform3f(color_location, 0.92f, 0.78f, 0.28f);
+        glBindVertexArray(cylinder_mesh.vao);
+        glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
+        glBindVertexArray(0);
+
+        glm::vec3 hair_color_value = hair_colors[glm::clamp(hair_color, 0, hair_color_count - 1)];
+        int render_style = (hair_unlock_mask & (1 << hair_style)) ? hair_style : 0;
+        if (render_style == 0) {
+            glm::mat4 crest = base_transform * glm::translate(glm::mat4(1.0f),
+                                                             glm::vec3(0.0f, 0.72f, -0.05f));
+            crest = glm::scale(crest, glm::vec3(0.12f, 0.3f, 0.4f));
+            glm::mat4 crest_mvp = projection * view * crest;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(crest_mvp));
+            glUniform3f(color_location, hair_color_value.r, hair_color_value.g, hair_color_value.b);
+            glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+        } else if (render_style == 1) {
+            glm::mat4 crest = base_transform * glm::translate(glm::mat4(1.0f),
+                                                             glm::vec3(0.0f, 0.78f, -0.02f));
+            crest = glm::scale(crest, glm::vec3(0.16f, 0.4f, 0.55f));
+            glm::mat4 crest_mvp = projection * view * crest;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(crest_mvp));
+            glUniform3f(color_location, hair_color_value.r, hair_color_value.g, hair_color_value.b);
+            glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+        } else {
+            for (int i = 0; i < 3; ++i) {
+                float offset = (static_cast<float>(i) - 1.0f) * 0.14f;
+                glm::mat4 spike = base_transform * glm::translate(glm::mat4(1.0f),
+                                                                glm::vec3(offset, 0.72f, -0.05f));
+                spike = glm::scale(spike, glm::vec3(0.12f, 0.3f, 0.12f));
+                glm::mat4 spike_mvp = projection * view * spike;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(spike_mvp));
+                glUniform3f(color_location, hair_color_value.r, hair_color_value.g, hair_color_value.b);
+                glBindVertexArray(cone_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, cone_mesh.count);
+                glBindVertexArray(0);
+            }
+        }
+
+        glm::mat4 pauldron = base_transform * glm::translate(glm::mat4(1.0f), glm::vec3(0.38f, 0.25f, 0.0f));
+        pauldron = glm::scale(pauldron, glm::vec3(0.22f));
+        glm::mat4 pauldron_mvp = projection * view * pauldron;
+        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(pauldron_mvp));
+        glUniform3f(color_location, 0.95f, 0.85f, 0.25f);
         glBindVertexArray(sphere_mesh.vao);
         glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
         glBindVertexArray(0);
 
+        glm::mat4 pauldron_left = base_transform * glm::translate(glm::mat4(1.0f), glm::vec3(-0.38f, 0.25f, 0.0f));
+        pauldron_left = glm::scale(pauldron_left, glm::vec3(0.22f));
+        glm::mat4 pauldron_left_mvp = projection * view * pauldron_left;
+        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(pauldron_left_mvp));
+        glUniform3f(color_location, 0.95f, 0.85f, 0.25f);
+        glBindVertexArray(sphere_mesh.vao);
+        glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
+        glBindVertexArray(0);
+
+        glUniform3f(color_location, player_color.r, player_color.g, player_color.b);
+
         glm::vec3 aim_dir = glm::normalize(glm::vec3(std::cos(player_yaw), 0.0f, std::sin(player_yaw)));
         glm::vec3 right_dir = glm::normalize(glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), aim_dir));
+        float arm_swing = std::sin(run_time * 4.0f) * 0.6f * player_move_amount;
+
+        glm::mat4 hand_left = base_transform * glm::translate(glm::mat4(1.0f),
+                                                              glm::vec3(-0.48f, 0.1f, 0.0f));
+        hand_left = glm::rotate(hand_left, arm_swing, glm::vec3(1.0f, 0.0f, 0.0f));
+        glm::mat4 arm_left = hand_left;
+        arm_left = glm::scale(arm_left, glm::vec3(0.16f, 0.45f, 0.16f));
+        glm::mat4 arm_left_mvp = projection * view * arm_left;
+        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(arm_left_mvp));
+        glUniform3f(color_location, player_color.r, player_color.g, player_color.b);
+        glBindVertexArray(cylinder_mesh.vao);
+        glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
+        glBindVertexArray(0);
+
+        glm::mat4 hand_right = base_transform * glm::translate(glm::mat4(1.0f),
+                                                               glm::vec3(0.48f, 0.1f, 0.0f));
+        hand_right = glm::rotate(hand_right, -arm_swing, glm::vec3(1.0f, 0.0f, 0.0f));
+        glm::mat4 arm_right = hand_right;
+        arm_right = glm::scale(arm_right, glm::vec3(0.16f, 0.45f, 0.16f));
+        glm::mat4 arm_right_mvp = projection * view * arm_right;
+        glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(arm_right_mvp));
+        glUniform3f(color_location, player_color.r, player_color.g, player_color.b);
+        glBindVertexArray(cylinder_mesh.vao);
+        glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
+        glBindVertexArray(0);
 
         if (crossbow_level > 0) {
-            glm::mat4 bow_model = base_transform * glm::translate(glm::mat4(1.0f),
-                                                                 glm::vec3(-0.35f, 0.12f, 0.0f));
-            bow_model = glm::scale(bow_model, glm::vec3(0.55f, 0.18f, 0.18f));
+            glm::mat4 bow_model = hand_left * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -0.15f, 0.35f));
+            bow_model = glm::scale(bow_model, glm::vec3(0.5f, 0.14f, 0.14f));
             glm::mat4 bow_mvp = projection * view * bow_model;
             glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(bow_mvp));
             glUniform3f(color_location, 0.55f, 0.38f, 0.22f);
@@ -3690,12 +4455,11 @@ struct Obstacle {
         }
 
         if (stick_level > 0) {
-            glm::mat4 stake_model = base_transform * glm::translate(glm::mat4(1.0f),
-                                                                   glm::vec3(0.35f, 0.12f, 0.0f));
-            stake_model = glm::scale(stake_model, glm::vec3(0.55f, 0.12f, 0.12f));
+            glm::mat4 stake_model = hand_right * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -0.15f, 0.42f));
+            stake_model = glm::scale(stake_model, glm::vec3(0.6f, 0.14f, 0.12f));
             glm::mat4 stake_mvp = projection * view * stake_model;
             glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(stake_mvp));
-            glUniform3f(color_location, 0.60f, 0.40f, 0.20f);
+            glUniform3f(color_location, 0.62f, 0.40f, 0.18f);
             glBindVertexArray(cube_vao);
             glDrawArrays(GL_TRIANGLES, 0, 36);
             glBindVertexArray(0);
@@ -3718,6 +4482,32 @@ struct Obstacle {
             glUniform1f(alpha_location, 1.0f);
         }
 
+        if (state == GameState::Running) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(ring_program);
+            auto draw_decal = [&](const glm::vec3& pos, float radius) {
+                float y = TerrainHeightAt(pos.x, pos.z, pos.y) + 0.03f;
+                glm::mat4 ring_model = glm::translate(glm::mat4(1.0f), glm::vec3(pos.x, y, pos.z));
+                ring_model = glm::scale(ring_model, glm::vec3(radius, 1.0f, radius));
+                glm::mat4 ring_mvp = projection * view * ring_model;
+                glUniformMatrix4fv(ring_mvp_location, 1, GL_FALSE, glm::value_ptr(ring_mvp));
+                glUniform3f(ring_color_location, 0.05f, 0.05f, 0.08f);
+                glUniform1f(ring_phase_location, 0.35f);
+                glUniform1f(ring_alpha_location, 0.35f);
+                glBindVertexArray(ring_vao);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+                glBindVertexArray(0);
+            };
+
+            draw_decal(player_position, 0.75f);
+            for (const Enemy& enemy : enemies) {
+                draw_decal(enemy.position, 0.55f * enemy.scale);
+            }
+            glUseProgram(program);
+            glDisable(GL_BLEND);
+        }
+
         for (const Enemy& enemy : enemies) {
             float bob = 0.08f * std::sin(run_time * 3.5f + enemy.phase);
             glm::vec3 base_pos = enemy.position + glm::vec3(0.0f, 0.35f + bob, 0.0f);
@@ -3727,6 +4517,10 @@ struct Obstacle {
                 : glm::vec3(0.85f, 0.25f, 0.65f);
             float pulse = 0.5f + 0.5f * std::sin(run_time * 2.4f + enemy.phase);
             glm::vec3 mix_color = glm::mix(base_color, accent, 0.35f * pulse);
+            if (enemy.hit_flash > 0.0f) {
+                float flash = glm::clamp(enemy.hit_flash / 0.12f, 0.0f, 1.0f);
+                mix_color = glm::mix(mix_color, glm::vec3(0.95f, 0.95f, 0.95f), flash);
+            }
             if (enemy.elite) {
                 float glow = 0.65f + 0.35f * std::sin(run_time * 5.0f + enemy.phase);
                 glUniform3f(color_location, mix_color.r * glow, mix_color.g * glow, mix_color.b * glow);
@@ -3734,70 +4528,28 @@ struct Obstacle {
                 glUniform3f(color_location, mix_color.r, mix_color.g, mix_color.b);
             }
 
-            if (enemy.type == 0) {
-                glm::mat4 body = glm::translate(glm::mat4(1.0f), base_pos);
-                body = glm::scale(body, glm::vec3(enemy.scale * 0.9f, enemy.scale * 0.6f, enemy.scale * 1.1f));
-                glm::mat4 body_mvp = projection * view * body;
-                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(body_mvp));
-                glBindVertexArray(cylinder_mesh.vao);
-                glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
-                glBindVertexArray(0);
+            glm::vec3 to_player = player_position - enemy.position;
+            to_player.y = 0.0f;
+            float enemy_yaw = std::atan2(to_player.x, to_player.z);
+            glm::mat4 enemy_base = glm::translate(glm::mat4(1.0f), base_pos);
+            enemy_base = glm::rotate(enemy_base, enemy_yaw, glm::vec3(0.0f, 1.0f, 0.0f));
 
-                glm::mat4 head = glm::translate(glm::mat4(1.0f), base_pos + glm::vec3(0.0f, 0.35f, 0.0f));
-                head = glm::scale(head, glm::vec3(enemy.scale * 0.45f));
-                glm::mat4 head_mvp = projection * view * head;
-                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(head_mvp));
-                glBindVertexArray(sphere_mesh.vao);
-                glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
-                glBindVertexArray(0);
-
-                glm::mat4 tail = glm::translate(glm::mat4(1.0f), base_pos + glm::vec3(0.0f, -0.35f, 0.0f));
-                tail = glm::scale(tail, glm::vec3(enemy.scale * 0.35f));
-                glm::mat4 tail_mvp = projection * view * tail;
-                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(tail_mvp));
-                glBindVertexArray(sphere_mesh.vao);
-                glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
-                glBindVertexArray(0);
-            } else if (enemy.type == 1) {
-                glm::mat4 enemy_model = glm::translate(glm::mat4(1.0f), base_pos);
-                enemy_model = glm::scale(enemy_model, glm::vec3(enemy.scale * 0.7f,
-                                                               enemy.scale * 0.45f,
-                                                               enemy.scale * 1.4f));
-                glm::mat4 enemy_mvp = projection * view * enemy_model;
-                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(enemy_mvp));
-                glBindVertexArray(cone_mesh.vao);
-                glDrawArrays(GL_TRIANGLES, 0, cone_mesh.count);
-                glBindVertexArray(0);
-            } else if (enemy.type == 3) {
-                glm::mat4 stem = glm::translate(glm::mat4(1.0f), base_pos);
-                stem = glm::scale(stem, glm::vec3(enemy.scale * 0.6f,
-                                                  enemy.scale * 1.1f,
-                                                  enemy.scale * 0.6f));
-                glm::mat4 stem_mvp = projection * view * stem;
-                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(stem_mvp));
-                glBindVertexArray(cone_mesh.vao);
-                glDrawArrays(GL_TRIANGLES, 0, cone_mesh.count);
-                glBindVertexArray(0);
-
-                glm::mat4 bud = glm::translate(glm::mat4(1.0f),
-                                               base_pos + glm::vec3(0.0f, 0.55f, 0.0f));
-                bud = glm::scale(bud, glm::vec3(enemy.scale * 0.35f));
-                glm::mat4 bud_mvp = projection * view * bud;
-                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(bud_mvp));
-                glBindVertexArray(sphere_mesh.vao);
-                glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
-                glBindVertexArray(0);
-            } else {
-                glm::mat4 enemy_model = glm::translate(glm::mat4(1.0f), base_pos);
-                enemy_model = glm::scale(enemy_model, glm::vec3(enemy.scale * 1.2f,
-                                                               enemy.scale * 1.1f,
-                                                               enemy.scale * 1.2f));
-                glm::mat4 enemy_mvp = projection * view * enemy_model;
-                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(enemy_mvp));
-                glBindVertexArray(cube_vao);
-                glDrawArrays(GL_TRIANGLES, 0, 36);
-                glBindVertexArray(0);
+            int mesh_index = enemy.type;
+            if (mesh_index < 0 || mesh_index > 3) {
+                mesh_index = 0;
             }
+            glm::mat4 enemy_model = enemy_base;
+            glm::vec3 scale(enemy.scale);
+            if (enemy.type == 2) {
+                float squash = 0.08f * std::sin(run_time * 3.0f + enemy.phase);
+                scale = glm::vec3(enemy.scale * (1.05f - squash), enemy.scale * (0.95f + squash), enemy.scale * (1.05f - squash));
+            }
+            enemy_model = glm::scale(enemy_model, scale);
+            glm::mat4 enemy_mvp = projection * view * enemy_model;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(enemy_mvp));
+            glBindVertexArray(enemy_meshes[mesh_index].vao);
+            glDrawArrays(GL_TRIANGLES, 0, enemy_meshes[mesh_index].count);
+            glBindVertexArray(0);
         }
 
         for (const Ally& ally : allies) {
@@ -4036,6 +4788,28 @@ struct Obstacle {
         }
 
         for (const Projectile& projectile : projectiles) {
+            glm::vec3 dir = projectile.velocity;
+            dir.y = 0.0f;
+            float len = glm::length(dir);
+            if (len > 0.001f) {
+                dir /= len;
+                float yaw = std::atan2(dir.x, dir.z);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glUniform1f(alpha_location, 0.5f);
+                glm::mat4 trail = glm::translate(glm::mat4(1.0f),
+                                                 projectile.position - glm::vec3(dir.x, 0.0f, dir.z) * 0.4f);
+                trail = glm::rotate(trail, yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+                trail = glm::scale(trail, glm::vec3(0.12f, 0.12f, 0.8f));
+                glm::mat4 trail_mvp = projection * view * trail;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(trail_mvp));
+                glUniform3f(color_location, projectile.color.r, projectile.color.g, projectile.color.b);
+                glBindVertexArray(cube_vao);
+                glDrawArrays(GL_TRIANGLES, 0, 36);
+                glBindVertexArray(0);
+                glUniform1f(alpha_location, 1.0f);
+                glDisable(GL_BLEND);
+            }
             glm::mat4 proj_model = glm::translate(
                 glm::mat4(1.0f),
                 projectile.position);
@@ -4072,13 +4846,52 @@ struct Obstacle {
             glm::vec3 bat_pos = player_position +
                 glm::vec3(std::cos(run_time * 2.6f), 0.9f + 0.15f * std::sin(run_time * 3.2f),
                           std::sin(run_time * 2.6f)) * 1.4f;
-            glUniform3f(color_location, 0.55f, 0.30f, 0.85f);
+            float flap = std::sin(run_time * 6.0f) * 0.6f;
+            glUniform3f(color_location, 0.20f, 0.80f, 0.95f);
             glm::mat4 bat_body = glm::translate(glm::mat4(1.0f), bat_pos);
             bat_body = glm::scale(bat_body, glm::vec3(0.45f, 0.2f, 0.65f));
             glm::mat4 bat_mvp = projection * view * bat_body;
             glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(bat_mvp));
             glBindVertexArray(cube_vao);
             glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+
+            glm::mat4 wing_left = glm::translate(glm::mat4(1.0f), bat_pos + glm::vec3(-0.45f, 0.02f, 0.0f));
+            wing_left = glm::rotate(wing_left, flap, glm::vec3(0.0f, 0.0f, 1.0f));
+            wing_left = glm::scale(wing_left, glm::vec3(0.55f, 0.05f, 0.25f));
+            glm::mat4 wing_left_mvp = projection * view * wing_left;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(wing_left_mvp));
+            glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+
+            glm::mat4 wing_right = glm::translate(glm::mat4(1.0f), bat_pos + glm::vec3(0.45f, 0.02f, 0.0f));
+            wing_right = glm::rotate(wing_right, -flap, glm::vec3(0.0f, 0.0f, 1.0f));
+            wing_right = glm::scale(wing_right, glm::vec3(0.55f, 0.05f, 0.25f));
+            glm::mat4 wing_right_mvp = projection * view * wing_right;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(wing_right_mvp));
+            glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+
+            glm::mat4 eye_left = glm::translate(glm::mat4(1.0f),
+                                                bat_pos + glm::vec3(-0.12f, 0.05f, 0.25f));
+            eye_left = glm::scale(eye_left, glm::vec3(0.08f));
+            glm::mat4 eye_left_mvp = projection * view * eye_left;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(eye_left_mvp));
+            glUniform3f(color_location, 0.98f, 0.98f, 1.0f);
+            glBindVertexArray(sphere_mesh.vao);
+            glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
+            glBindVertexArray(0);
+
+            glm::mat4 eye_right = glm::translate(glm::mat4(1.0f),
+                                                 bat_pos + glm::vec3(0.12f, 0.05f, 0.25f));
+            eye_right = glm::scale(eye_right, glm::vec3(0.08f));
+            glm::mat4 eye_right_mvp = projection * view * eye_right;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(eye_right_mvp));
+            glUniform3f(color_location, 0.98f, 0.98f, 1.0f);
+            glBindVertexArray(sphere_mesh.vao);
+            glDrawArrays(GL_TRIANGLES, 0, sphere_mesh.count);
             glBindVertexArray(0);
         }
 
@@ -4112,6 +4925,17 @@ struct Obstacle {
             static_cast<float>(window_height),
             -1.0f,
             1.0f);
+
+        if (player_hurt_timer > 0.0f) {
+            float t = glm::clamp(player_hurt_timer / 0.25f, 0.0f, 1.0f);
+            glUniform1f(alpha_location, 0.25f * t);
+            draw_ui_quad(0.0f, 0.0f,
+                         static_cast<float>(window_width),
+                         static_cast<float>(window_height),
+                         glm::vec3(0.9f, 0.2f, 0.25f),
+                         ui_projection);
+            glUniform1f(alpha_location, 1.0f);
+        }
 
         float font_height = ui_font ? static_cast<float>(TTF_FontHeight(ui_font)) : 16.0f;
         if (state == GameState::Running || state == GameState::Paused || state == GameState::LevelUp ||
@@ -4190,15 +5014,27 @@ struct Obstacle {
 
         if (state == GameState::MainMenu) {
             float panel_w = 360.0f;
-            float panel_h = 220.0f;
+            float panel_h = 250.0f;
             float panel_x = (window_width - panel_w) * 0.5f;
             float panel_y = (window_height - panel_h) * 0.5f;
             draw_ui_quad(panel_x, panel_y, panel_w, panel_h, glm::vec3(0.10f, 0.10f, 0.14f), ui_projection);
-            for (int i = 0; i < 3; ++i) {
+            for (int i = 0; i < 4; ++i) {
                 float y = panel_y + panel_h - 60.0f - i * 48.0f;
                 glm::vec3 color = (i == main_menu_index) ? glm::vec3(0.85f, 0.72f, 0.25f)
                                                          : glm::vec3(0.22f, 0.22f, 0.28f);
                 draw_ui_quad(panel_x + 40.0f, y, panel_w - 80.0f, 28.0f, color, ui_projection);
+            }
+        } else if (state == GameState::Customization) {
+            float panel_w = 420.0f;
+            float panel_h = 260.0f;
+            float panel_x = (window_width - panel_w) * 0.5f;
+            float panel_y = (window_height - panel_h) * 0.5f;
+            draw_ui_quad(panel_x, panel_y, panel_w, panel_h, glm::vec3(0.10f, 0.10f, 0.14f), ui_projection);
+            for (int i = 0; i < 3; ++i) {
+                float y = panel_y + panel_h - 60.0f - i * 52.0f;
+                glm::vec3 color = (i == customize_menu_index) ? glm::vec3(0.20f, 0.65f, 0.95f)
+                                                              : glm::vec3(0.22f, 0.22f, 0.28f);
+                draw_ui_quad(panel_x + 40.0f, y, panel_w - 80.0f, 30.0f, color, ui_projection);
             }
         } else if (state == GameState::PowerUps) {
             float panel_w = 420.0f;
@@ -4246,7 +5082,7 @@ struct Obstacle {
 
         if (state == GameState::MainMenu) {
             float panel_w = 360.0f;
-            float panel_h = 220.0f;
+            float panel_h = 250.0f;
             float panel_x = (window_width - panel_w) * 0.5f;
             float panel_y = (window_height - panel_h) * 0.5f;
             auto starters = build_starter_weapons();
@@ -4260,7 +5096,9 @@ struct Obstacle {
                                "Power Ups", main_menu_index == 1 ? ui_highlight_text : ui_dim,
                                ui_projection);
             draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 156.0f, panel_w - 80.0f, 28.0f,
-                               "Quit", main_menu_index == 2 ? ui_highlight_text : ui_dim, ui_projection);
+                               "Customize", main_menu_index == 2 ? ui_highlight_text : ui_dim, ui_projection);
+            draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 204.0f, panel_w - 80.0f, 28.0f,
+                               "Quit", main_menu_index == 3 ? ui_highlight_text : ui_dim, ui_projection);
             draw_text_centered(panel_x, panel_y - 96.0f, panel_w, 22.0f,
                                "Coins: " + std::to_string(coins), ui_white, ui_projection);
             draw_text_centered(panel_x, panel_y - 72.0f, panel_w, 20.0f,
@@ -4272,6 +5110,30 @@ struct Obstacle {
                                "Seed: " + std::to_string(terrain_seed), ui_dim, ui_projection);
             draw_text_centered(panel_x, panel_y - 14.0f, panel_w, 18.0f,
                                "Press R to reroll", ui_dim, ui_projection);
+        } else if (state == GameState::Customization) {
+            float panel_w = 420.0f;
+            float panel_h = 260.0f;
+            float panel_x = (window_width - panel_w) * 0.5f;
+            float panel_y = (window_height - panel_h) * 0.5f;
+            int style_mask = 1 << hair_style;
+            bool style_unlocked = (hair_unlock_mask & style_mask) != 0;
+            std::string style_label = std::string(hair_style_names[hair_style]) +
+                (style_unlocked ? " (Unlocked)" : " (Cost " + std::to_string(hair_style_costs[hair_style]) + ")");
+            draw_text_centered(panel_x, panel_y + panel_h + 16.0f, panel_w, 28.0f,
+                               "Customize", ui_white, ui_projection);
+            draw_text_centered(panel_x, panel_y - 6.0f, panel_w, 20.0f,
+                               "Coins: " + std::to_string(coins), ui_white, ui_projection);
+            draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 62.0f, panel_w - 80.0f, 26.0f,
+                               "Hairstyle: " + style_label,
+                               customize_menu_index == 0 ? ui_highlight_text : ui_dim, ui_projection);
+            draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 114.0f, panel_w - 80.0f, 26.0f,
+                               std::string("Mohawk Color #") + std::to_string(hair_color + 1),
+                               customize_menu_index == 1 ? ui_highlight_text : ui_dim,
+                               ui_projection);
+            draw_text_centered(panel_x + 40.0f, panel_y + panel_h - 166.0f, panel_w - 80.0f, 26.0f,
+                               "Back", customize_menu_index == 2 ? ui_highlight_text : ui_dim, ui_projection);
+            draw_text_centered(panel_x, panel_y - 22.0f, panel_w, 20.0f,
+                               "Left/Right to adjust", ui_dim, ui_projection);
         } else if (state == GameState::PowerUps) {
             int cost_damage = 10 + 5 * meta_damage_level;
             int cost_speed = 8 + 4 * meta_speed_level;
@@ -4441,7 +5303,9 @@ struct Obstacle {
         std::string title;
         if (state == GameState::MainMenu) {
             title = "MAIN MENU | Coins " + std::to_string(coins) +
-                    " | Start Run | Power Ups | Quit (Enter)";
+                    " | Start Run | Power Ups | Customize | Quit (Enter)";
+        } else if (state == GameState::Customization) {
+            title = "CUSTOMIZE | Left/Right Change | Enter Buy/Select | ESC Back";
         } else if (state == GameState::PowerUps) {
             int cost_damage = 10 + 5 * meta_damage_level;
             int cost_speed = 8 + 4 * meta_speed_level;
@@ -4527,6 +5391,22 @@ struct Obstacle {
     glDeleteBuffers(1, &cone_mesh.vbo);
     glDeleteVertexArrays(1, &cylinder_mesh.vao);
     glDeleteBuffers(1, &cylinder_mesh.vbo);
+    for (Mesh& mesh : enemy_meshes) {
+        glDeleteVertexArrays(1, &mesh.vao);
+        glDeleteBuffers(1, &mesh.vbo);
+    }
+    for (Mesh& mesh : rock_meshes_low) {
+        glDeleteVertexArrays(1, &mesh.vao);
+        glDeleteBuffers(1, &mesh.vbo);
+    }
+    for (Mesh& mesh : rock_meshes) {
+        glDeleteVertexArrays(1, &mesh.vao);
+        glDeleteBuffers(1, &mesh.vbo);
+    }
+    glDeleteVertexArrays(1, &tree_mesh.vao);
+    glDeleteBuffers(1, &tree_mesh.vbo);
+    glDeleteVertexArrays(1, &tree_mesh_low.vao);
+    glDeleteBuffers(1, &tree_mesh_low.vbo);
     glDeleteProgram(program);
     glDeleteProgram(text_program);
     glDeleteProgram(ring_program);
