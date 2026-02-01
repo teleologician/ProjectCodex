@@ -309,6 +309,8 @@ static noise::module::Perlin g_rock_noise;
 enum class StarterWeaponId {
     Garlic,
     HolyBomb,
+    Shuriken,
+    Boomerang,
     Cross,
     Stake,
     Crossbow,
@@ -325,6 +327,8 @@ std::vector<StarterWeaponOption> BuildStarterWeapons(bool unlock_cross, bool unl
     std::vector<StarterWeaponOption> options;
     options.push_back({StarterWeaponId::Garlic, "Garlic"});
     options.push_back({StarterWeaponId::HolyBomb, "Holy Bomb"});
+    options.push_back({StarterWeaponId::Shuriken, "Shuriken"});
+    options.push_back({StarterWeaponId::Boomerang, "Boomerang"});
     if (unlock_cross) {
         options.push_back({StarterWeaponId::Cross, "Cross"});
     }
@@ -2129,6 +2133,7 @@ int main() {
         int type;
         bool elite;
         float hit_flash = 0.0f;
+        float boomerang_hit_timer = 0.0f;
     };
 
     struct ExperienceGem {
@@ -2146,7 +2151,8 @@ int main() {
         TownHall,
         Barracks,
         Armory,
-        Watchtower
+        Watchtower,
+        GatlingTower
     };
 
     struct Building {
@@ -2208,15 +2214,35 @@ int main() {
         float production_timer = 0.0f;
         float barracks_timer = 0.0f;
         float watchtower_timer = 0.0f;
+        float gatling_timer = 0.0f;
         int barracks_level = 0;
         int armory_level = 0;
         int watchtower_level = 0;
+        int gatling_level = 0;
+        int gatling_building_index = -1;
         glm::vec2 center = glm::vec2(0.0f);
         float radius = 0.0f;
         int wall_open_a = 0;
         int wall_open_b = 1;
         bool ui_open = false;
         int platform_index = -1;
+    };
+
+    enum class UnlockableId {
+        GatlingTower
+    };
+
+    enum class RequirementType {
+        TownsCapturedAtLeast
+    };
+
+    struct Requirement {
+        RequirementType type = RequirementType::TownsCapturedAtLeast;
+        int value = 0;
+    };
+
+    struct RunState {
+        int towns_captured_count = 0;
     };
 
     struct Ally {
@@ -2266,6 +2292,24 @@ struct Obstacle {
         float lifetime;
         int damage;
         glm::vec3 color;
+        int pierce = 0;
+        float spin_speed = 0.0f;
+        float spin_offset = 0.0f;
+        int style = 0;
+    };
+
+    struct Boomerang {
+        glm::vec3 position;
+        glm::vec3 direction;
+        float speed = 0.0f;
+        float return_speed = 0.0f;
+        float max_distance = 0.0f;
+        float traveled = 0.0f;
+        float lifetime = 0.0f;
+        int damage = 1;
+        int pierce = 0;
+        bool returning = false;
+        float spin = 0.0f;
     };
 
     struct Bomb {
@@ -2314,6 +2358,10 @@ struct Obstacle {
         FireballUpgrade,
         GarlicUpgrade,
         Magnet,
+        Shuriken,
+        ShurikenUpgrade,
+        Boomerang,
+        BoomerangUpgrade,
         Cross,
         CrossUpgrade,
         Stick,
@@ -2402,6 +2450,16 @@ struct Obstacle {
     float player_move_amount = 0.0f;
     int player_level = 1;
     int player_xp = 0;
+    RunState run_state;
+    int shuriken_level = 0;
+    float shuriken_timer = 0.0f;
+    float shuriken_cooldown = 2.0f;
+    int shuriken_damage = 1;
+    int boomerang_level = 0;
+    float boomerang_timer = 0.0f;
+    float boomerang_cooldown = 3.0f;
+    int boomerang_damage = 2;
+    std::vector<Boomerang> boomerangs;
     int player_health = 10;
     int player_max_health = 10;
     float player_speed = 4.0f;
@@ -2819,7 +2877,7 @@ struct Obstacle {
         }
 
         float phase = unit_dist(rng) * glm::two_pi<float>();
-        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite, 0.0f});
+        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite, 0.0f, 0.0f});
         spawn_poofs.push_back(SpawnPoof{position, 0.0f, 0.5f});
     };
 
@@ -2905,7 +2963,7 @@ struct Obstacle {
         }
 
         float phase = unit_dist(rng) * glm::two_pi<float>();
-        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite, 0.0f});
+        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite, 0.0f, 0.0f});
         spawn_poofs.push_back(SpawnPoof{position, 0.0f, 0.5f});
     };
 
@@ -3151,6 +3209,23 @@ struct Obstacle {
         rebuild_obstacles();
     };
 
+    auto GetRequirement = [&](UnlockableId id) -> Requirement {
+        switch (id) {
+            case UnlockableId::GatlingTower:
+                return Requirement{RequirementType::TownsCapturedAtLeast, 3};
+        }
+        return Requirement{RequirementType::TownsCapturedAtLeast, 0};
+    };
+
+    auto IsUnlocked = [&](UnlockableId id, const RunState& state) -> bool {
+        Requirement req = GetRequirement(id);
+        switch (req.type) {
+            case RequirementType::TownsCapturedAtLeast:
+                return state.towns_captured_count >= req.value;
+        }
+        return false;
+    };
+
     auto xp_needed_for_level = [&](int level) {
         float xp = balance.xp_base * std::pow(static_cast<float>(level), balance.xp_power) +
                    balance.xp_linear * static_cast<float>(level);
@@ -3233,6 +3308,15 @@ struct Obstacle {
         fireball_timer = 0.0f;
         fireball_cooldown = 1.5f;
         fireball_damage = 2 + meta_damage_level;
+        shuriken_level = starter_id == StarterWeaponId::Shuriken ? 1 : 0;
+        shuriken_timer = 0.0f;
+        shuriken_cooldown = 2.0f;
+        shuriken_damage = 1 + meta_damage_level / 2;
+        boomerang_level = starter_id == StarterWeaponId::Boomerang ? 1 : 0;
+        boomerang_timer = 0.0f;
+        boomerang_cooldown = 3.0f;
+        boomerang_damage = 2 + meta_damage_level / 2;
+        boomerangs.clear();
         crossbow_level = starter_id == StarterWeaponId::Crossbow ? 1 : 0;
         crossbow_timer = 0.0f;
         crossbow_cooldown = 1.2f;
@@ -3277,6 +3361,7 @@ struct Obstacle {
         enemies_killed = 0;
         coins_earned = 0;
         points = 0;
+        run_state.towns_captured_count = 0;
         victory = false;
         freeze_timer = 0.0f;
         nuke_cooldown_timer = 0.0f;
@@ -3762,7 +3847,7 @@ struct Obstacle {
                             }
                             towns[best_index].ui_open = next_state;
                         }
-                    } else if (key == SDLK_1 || key == SDLK_2 || key == SDLK_3) {
+                    } else if (key == SDLK_1 || key == SDLK_2 || key == SDLK_3 || key == SDLK_4) {
                         int open_town_index = -1;
                         for (int i = 0; i < static_cast<int>(towns.size()); ++i) {
                             if (towns[i].ui_open) {
@@ -3772,15 +3857,18 @@ struct Obstacle {
                         }
                         if (open_town_index >= 0) {
                             Town& town = towns[open_town_index];
-                            int key_index = key == SDLK_1 ? 0 : (key == SDLK_2 ? 1 : 2);
+                            int key_index = key == SDLK_1 ? 0 : (key == SDLK_2 ? 1 : (key == SDLK_3 ? 2 : 3));
                             int towns_built = static_cast<int>(towns.size());
                             float town_mult = 1.0f + towns_built * balance.town_cost_mult;
                             int barracks_level = town.barracks_level + 1;
                             int armory_level = town.armory_level + 1;
                             int watch_level = town.watchtower_level + 1;
+                            int gatling_level = town.gatling_level + 1;
                             int barracks_cost = static_cast<int>(std::ceil(balance.barracks_base * std::pow(balance.barracks_growth, barracks_level - 1) * town_mult));
                             int armory_cost = static_cast<int>(std::ceil(balance.armory_base * std::pow(balance.armory_growth, armory_level - 1) * town_mult));
                             int watch_cost = static_cast<int>(std::ceil(balance.watch_base * std::pow(balance.watch_growth, watch_level - 1) * town_mult));
+                            int gatling_cost = static_cast<int>(std::ceil(220.0f * std::pow(1.6f, gatling_level - 1) * town_mult));
+                            bool gatling_unlocked = IsUnlocked(UnlockableId::GatlingTower, run_state);
                             if (key_index == 0 && points >= barracks_cost) {
                                 points -= barracks_cost;
                                 town.barracks_level += 1;
@@ -3790,6 +3878,36 @@ struct Obstacle {
                             } else if (key_index == 2 && points >= watch_cost) {
                                 points -= watch_cost;
                                 town.watchtower_level += 1;
+                            } else if (key_index == 3 && gatling_unlocked && points >= gatling_cost) {
+                                points -= gatling_cost;
+                                if (town.gatling_level == 0 && town.gatling_building_index < 0) {
+                                    float best_dist = std::numeric_limits<float>::max();
+                                    int best_index = -1;
+                                    if (town.platform_index >= 0 &&
+                                        town.platform_index < static_cast<int>(platforms.size())) {
+                                        const Platform& platform = platforms[town.platform_index];
+                                        for (int index : platform.home_indices) {
+                                            if (index < 0 || index >= static_cast<int>(buildings.size())) {
+                                                continue;
+                                            }
+                                            if (buildings[index].type != BuildingType::House ||
+                                                buildings[index].owner != BuildingOwner::Player) {
+                                                continue;
+                                            }
+                                            glm::vec2 delta = buildings[index].center - town.center;
+                                            float dist = glm::dot(delta, delta);
+                                            if (dist < best_dist) {
+                                                best_dist = dist;
+                                                best_index = index;
+                                            }
+                                        }
+                                    }
+                                    if (best_index >= 0) {
+                                        buildings[best_index].type = BuildingType::GatlingTower;
+                                        town.gatling_building_index = best_index;
+                                    }
+                                }
+                                town.gatling_level += 1;
                             }
                         }
                     } else if (key == SDLK_ESCAPE) {
@@ -3822,6 +3940,26 @@ struct Obstacle {
                                 fireball_level += 1;
                                 fireball_damage += 1;
                                 fireball_cooldown = glm::max(0.6f, fireball_cooldown - 0.1f);
+                                break;
+                            case ItemId::Shuriken:
+                                shuriken_level = 1;
+                                shuriken_damage = 1 + meta_damage_level / 2;
+                                shuriken_cooldown = 2.0f;
+                                break;
+                            case ItemId::ShurikenUpgrade:
+                                shuriken_level += 1;
+                                shuriken_damage += 1;
+                                shuriken_cooldown = glm::max(0.8f, shuriken_cooldown - 0.1f);
+                                break;
+                            case ItemId::Boomerang:
+                                boomerang_level = 1;
+                                boomerang_damage = 2 + meta_damage_level / 2;
+                                boomerang_cooldown = 3.0f;
+                                break;
+                            case ItemId::BoomerangUpgrade:
+                                boomerang_level += 1;
+                                boomerang_damage += 1;
+                                boomerang_cooldown = glm::max(1.6f, boomerang_cooldown - 0.15f);
                                 break;
                         case ItemId::GarlicUpgrade:
                             if (garlic_level <= 0) {
@@ -4284,6 +4422,7 @@ struct Obstacle {
                         spawn_town_for_platform(p);
                         platform.state = PlatformState::ConvertedToTown;
                         rebuild_obstacles();
+                        run_state.towns_captured_count += 1;
                     }
                 }
             }
@@ -4431,6 +4570,59 @@ struct Obstacle {
                                 2.2f,
                                 damage,
                                 glm::vec3(0.90f, 0.75f, 0.35f)});
+                        }
+                    }
+                }
+                if (town.gatling_level > 0) {
+                    town.gatling_timer += delta_time;
+                    float interval = 0.6f / (1.0f + 0.45f * static_cast<float>(town.gatling_level));
+                    if (town.gatling_timer >= interval) {
+                        town.gatling_timer = 0.0f;
+                        float radius = 6.0f + 2.0f * static_cast<float>(town.gatling_level);
+                        float radius_sq = radius * radius;
+                        int damage = 1 + town.gatling_level / 2;
+                        glm::vec3 tower_pos = town.position;
+                        if (town.platform_index >= 0 &&
+                            town.platform_index < static_cast<int>(platforms.size())) {
+                            const Platform& platform = platforms[town.platform_index];
+                            if (town.gatling_building_index >= 0 &&
+                                town.gatling_building_index < static_cast<int>(buildings.size())) {
+                                float base_y = platform.state == PlatformState::ConvertedToTown
+                                    ? platform.ground_height
+                                    : platform.base_height - platform.fall_offset;
+                                tower_pos = glm::vec3(buildings[town.gatling_building_index].center.x,
+                                                     base_y,
+                                                     buildings[town.gatling_building_index].center.y);
+                            }
+                        }
+                        Enemy* best_enemy = nullptr;
+                        float best_dist = std::numeric_limits<float>::max();
+                        for (Enemy& enemy : enemies) {
+                            glm::vec3 delta = enemy.position - tower_pos;
+                            delta.y = 0.0f;
+                            float dist = glm::dot(delta, delta);
+                            if (dist <= radius_sq && dist < best_dist) {
+                                best_dist = dist;
+                                best_enemy = &enemy;
+                            }
+                        }
+                        if (best_enemy) {
+                            glm::vec3 launch_pos = tower_pos + glm::vec3(0.0f, 1.7f, 0.0f);
+                            glm::vec3 to_target = best_enemy->position + glm::vec3(0.0f, 0.3f, 0.0f) - launch_pos;
+                            if (glm::length(to_target) < 0.001f) {
+                                to_target = glm::vec3(0.0f, 0.0f, -1.0f);
+                            }
+                            glm::vec3 dir = glm::normalize(to_target);
+                            float spread = (unit_dist(rng) - 0.5f) * 0.08f;
+                            float c = std::cos(spread);
+                            float s = std::sin(spread);
+                            dir = glm::normalize(glm::vec3(dir.x * c - dir.z * s, 0.0f, dir.x * s + dir.z * c));
+                            projectiles.push_back(Projectile{
+                                launch_pos,
+                                dir * 12.5f,
+                                1.8f,
+                                damage,
+                                glm::vec3(0.95f, 0.85f, 0.25f)});
                         }
                     }
                 }
@@ -4832,6 +5024,9 @@ struct Obstacle {
                 if (enemy.hit_flash > 0.0f) {
                     enemy.hit_flash = glm::max(0.0f, enemy.hit_flash - delta_time);
                 }
+                if (enemy.boomerang_hit_timer > 0.0f) {
+                    enemy.boomerang_hit_timer = glm::max(0.0f, enemy.boomerang_hit_timer - delta_time);
+                }
             }
 
             auto damage_enemy = [&](Enemy& enemy, int dmg) {
@@ -4933,6 +5128,72 @@ struct Obstacle {
                         2.5f,
                         crossbow_damage,
                         glm::vec3(0.70f, 0.45f, 0.20f)});
+                }
+            }
+
+            shuriken_timer += delta_time;
+            if (shuriken_level > 0 && shuriken_timer >= shuriken_cooldown) {
+                shuriken_timer = 0.0f;
+                int count = 4;
+                if (shuriken_level == 2) {
+                    count = 6;
+                } else if (shuriken_level == 3 || shuriken_level == 4) {
+                    count = 8;
+                } else if (shuriken_level >= 5) {
+                    count = 12;
+                }
+                int pierce = shuriken_level >= 4 ? 1 : 0;
+                float speed = 7.5f;
+                float lifetime = 1.5f + 0.1f * static_cast<float>(shuriken_level);
+                for (int i = 0; i < count; ++i) {
+                    float angle = static_cast<float>(i) * glm::two_pi<float>() / static_cast<float>(count);
+                    glm::vec3 dir(std::cos(angle), 0.0f, std::sin(angle));
+                    projectiles.push_back(Projectile{
+                        player_position + glm::vec3(0.0f, 0.6f, 0.0f),
+                        dir * speed,
+                        lifetime,
+                        shuriken_damage,
+                        glm::vec3(0.70f, 0.95f, 0.95f),
+                        pierce,
+                        12.0f,
+                        unit_dist(rng) * glm::two_pi<float>(),
+                        1});
+                }
+            }
+
+            boomerang_timer += delta_time;
+            if (boomerang_level > 0 && boomerang_timer >= boomerang_cooldown && boomerangs.size() == 0) {
+                boomerang_timer = 0.0f;
+                int throw_count = boomerang_level >= 5 ? 2 : 1;
+                float range = 7.0f + 1.4f * static_cast<float>(boomerang_level);
+                if (boomerang_level >= 3) {
+                    range += 2.5f;
+                }
+                float speed = 7.0f + 0.4f * static_cast<float>(boomerang_level);
+                float return_speed = 9.0f + 0.6f * static_cast<float>(boomerang_level);
+                for (int i = 0; i < throw_count; ++i) {
+                    glm::vec3 dir = player_aim_dir;
+                    if (glm::length(dir) < 0.001f) {
+                        dir = glm::vec3(0.0f, 0.0f, -1.0f);
+                    }
+                    dir = glm::normalize(dir);
+                    if (throw_count > 1) {
+                        float spread = i == 0 ? -0.12f : 0.12f;
+                        float c = std::cos(spread);
+                        float s = std::sin(spread);
+                        dir = glm::normalize(glm::vec3(dir.x * c - dir.z * s, 0.0f, dir.x * s + dir.z * c));
+                    }
+                    Boomerang boomerang;
+                    boomerang.position = player_position + glm::vec3(0.0f, 0.8f, 0.0f);
+                    boomerang.direction = dir;
+                    boomerang.speed = speed;
+                    boomerang.return_speed = return_speed;
+                    boomerang.max_distance = range;
+                    boomerang.damage = boomerang_damage;
+                    boomerang.pierce = boomerang_level >= 4 ? 1 : 0;
+                    boomerang.lifetime = 5.0f;
+                    boomerang.spin = unit_dist(rng) * glm::two_pi<float>();
+                    boomerangs.push_back(boomerang);
                 }
             }
 
@@ -5053,6 +5314,48 @@ struct Obstacle {
                 }
             }
 
+            for (size_t i = 0; i < boomerangs.size();) {
+                Boomerang& boomerang = boomerangs[i];
+                boomerang.lifetime -= delta_time;
+                boomerang.spin += delta_time * 8.0f;
+                if (boomerang.lifetime <= 0.0f) {
+                    boomerangs[i] = boomerangs.back();
+                    boomerangs.pop_back();
+                    continue;
+                }
+                if (!boomerang.returning) {
+                    boomerang.position += boomerang.direction * boomerang.speed * delta_time;
+                    boomerang.traveled += boomerang.speed * delta_time;
+                    if (boomerang.traveled >= boomerang.max_distance) {
+                        boomerang.returning = true;
+                    }
+                } else {
+                    glm::vec3 to_player = player_position + glm::vec3(0.0f, 0.8f, 0.0f) - boomerang.position;
+                    if (glm::length(to_player) < 1.0f) {
+                        boomerangs[i] = boomerangs.back();
+                        boomerangs.pop_back();
+                        continue;
+                    }
+                    if (glm::length(to_player) > 0.001f) {
+                        boomerang.direction = glm::normalize(glm::vec3(to_player.x, 0.0f, to_player.z));
+                    }
+                    boomerang.position += boomerang.direction * boomerang.return_speed * delta_time;
+                }
+
+                for (Enemy& enemy : enemies) {
+                    glm::vec3 delta = enemy.position - boomerang.position;
+                    float dy = std::abs(delta.y);
+                    glm::vec2 flat(delta.x, delta.z);
+                    if (dy <= 1.3f && glm::dot(flat, flat) <= 0.85f * 0.85f) {
+                        if (enemy.boomerang_hit_timer <= 0.0f) {
+                            damage_enemy(enemy, boomerang.damage);
+                            enemy.boomerang_hit_timer = 0.35f;
+                        }
+                    }
+                }
+                ++i;
+            }
+
             for (size_t i = 0; i < projectiles.size();) {
                 projectiles[i].position += projectiles[i].velocity * delta_time;
                 projectiles[i].lifetime -= delta_time;
@@ -5096,8 +5399,13 @@ struct Obstacle {
                     }
                 }
                 if (hit) {
-                    projectiles[i] = projectiles.back();
-                    projectiles.pop_back();
+                    if (projectiles[i].pierce > 0) {
+                        projectiles[i].pierce -= 1;
+                        ++i;
+                    } else {
+                        projectiles[i] = projectiles.back();
+                        projectiles.pop_back();
+                    }
                 } else {
                     ++i;
                 }
@@ -5306,6 +5614,16 @@ struct Obstacle {
                     } else if (poison_level < 5) {
                         pool.push_back(ItemChoice{ItemId::PoisonBombUpgrade, "Caltrops +", 50});
                     }
+                }
+                if (shuriken_level == 0) {
+                    pool.push_back(ItemChoice{ItemId::Shuriken, "Shuriken", 70});
+                } else if (shuriken_level < 5) {
+                    pool.push_back(ItemChoice{ItemId::ShurikenUpgrade, "Shuriken +", 55});
+                }
+                if (boomerang_level == 0) {
+                    pool.push_back(ItemChoice{ItemId::Boomerang, "Boomerang", 70});
+                } else if (boomerang_level < 5) {
+                    pool.push_back(ItemChoice{ItemId::BoomerangUpgrade, "Boomerang +", 55});
                 }
                 if (fireball_level == 0) {
                     pool.push_back(ItemChoice{ItemId::Fireball, "Fireball", 80});
@@ -5640,6 +5958,47 @@ struct Obstacle {
                 glBindVertexArray(watchtower_mesh.vao);
                 glDrawArrays(GL_TRIANGLES, 0, watchtower_mesh.count);
                 glBindVertexArray(0);
+            } else if (building.type == BuildingType::GatlingTower) {
+                glUniform3f(color_location, 0.95f, 0.85f, 0.25f);
+                glm::mat4 gatling_base = model;
+                gatling_base = glm::scale(gatling_base, glm::vec3(0.7f, 1.0f, 0.7f));
+                glm::mat4 gatling_mvp = projection * view * gatling_base;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(gatling_mvp));
+                glBindVertexArray(cube_vao);
+                glDrawArrays(GL_TRIANGLES, 0, 36);
+
+                glm::mat4 barrel = model;
+                barrel = glm::translate(barrel, glm::vec3(0.0f, 0.45f, 0.35f));
+                barrel = glm::scale(barrel, glm::vec3(0.12f, 0.12f, 0.6f));
+                glm::mat4 barrel_mvp = projection * view * barrel;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(barrel_mvp));
+                glUniform3f(color_location, 0.85f, 0.65f, 0.20f);
+                glDrawArrays(GL_TRIANGLES, 0, 36);
+                glBindVertexArray(0);
+
+                int level = 0;
+                int town_index = -1;
+                for (int t = 0; t < static_cast<int>(towns.size()); ++t) {
+                    if (towns[t].gatling_building_index == &building - buildings.data()) {
+                        town_index = t;
+                        break;
+                    }
+                }
+                if (town_index >= 0) {
+                    level = towns[town_index].gatling_level;
+                }
+                for (int i = 0; i < level; ++i) {
+                    float offset = 0.25f + 0.18f * static_cast<float>(i);
+                    glm::mat4 crate = model;
+                    crate = glm::translate(crate, glm::vec3(0.35f, offset, -0.25f));
+                    crate = glm::scale(crate, glm::vec3(0.25f, 0.15f, 0.25f));
+                    glm::mat4 crate_mvp = projection * view * crate;
+                    glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(crate_mvp));
+                    glUniform3f(color_location, 0.95f, 0.75f, 0.15f);
+                    glBindVertexArray(cube_vao);
+                    glDrawArrays(GL_TRIANGLES, 0, 36);
+                    glBindVertexArray(0);
+                }
             } else {
                 glUniform3f(color_location, base_color.r, base_color.g, base_color.b);
                 const Mesh& base_mesh = house_base_meshes[building.house_variant];
@@ -5970,6 +6329,7 @@ struct Obstacle {
             glEnable(GL_DEPTH_TEST);
         }
 
+        glUniform1i(use_normals_location, 0);
         glm::vec3 player_color = skin_selected
             ? glm::vec3(0.35f, 0.20f, 0.85f)
             : glm::vec3(0.95f, 0.55f, 0.10f);
@@ -6040,6 +6400,24 @@ struct Obstacle {
         glBindVertexArray(cylinder_mesh.vao);
         glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
         glBindVertexArray(0);
+
+        int boomerang_max = boomerang_level >= 5 ? 2 : (boomerang_level > 0 ? 1 : 0);
+        if (boomerang_level > 0 && static_cast<int>(boomerangs.size()) < boomerang_max) {
+            glm::mat4 strap = base_transform * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.25f, -0.32f));
+            strap = glm::rotate(strap, glm::radians(18.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+            glm::mat4 wing_a = glm::scale(strap, glm::vec3(0.45f, 0.10f, 0.15f));
+            glm::mat4 wing_b = glm::rotate(strap, glm::radians(60.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+            wing_b = glm::scale(wing_b, glm::vec3(0.45f, 0.10f, 0.15f));
+            glm::mat4 wing_a_mvp = projection * view * wing_a;
+            glm::mat4 wing_b_mvp = projection * view * wing_b;
+            glUniform3f(color_location, 0.95f, 0.85f, 0.35f);
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(wing_a_mvp));
+            glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(wing_b_mvp));
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+        }
 
         glm::vec3 hair_color_value = hair_colors[glm::clamp(hair_color, 0, hair_color_count - 1)];
         int render_style = (hair_unlock_mask & (1 << hair_style)) ? hair_style : 0;
@@ -6483,6 +6861,7 @@ struct Obstacle {
             glEnable(GL_DEPTH_TEST);
         }
 
+        glUniform1i(use_normals_location, 0);
         for (const Projectile& projectile : projectiles) {
             glm::vec3 dir = projectile.velocity;
             dir.y = 0.0f;
@@ -6506,6 +6885,23 @@ struct Obstacle {
                 glUniform1f(alpha_location, 1.0f);
                 glDisable(GL_BLEND);
             }
+            if (projectile.style == 1) {
+                float spin = run_time * projectile.spin_speed + projectile.spin_offset;
+                glm::mat4 base = glm::translate(glm::mat4(1.0f), projectile.position);
+                base = glm::rotate(base, spin, glm::vec3(0.0f, 1.0f, 0.0f));
+                glm::mat4 blade_a = glm::scale(base, glm::vec3(0.55f, 0.08f, 0.12f));
+                glm::mat4 blade_b = glm::scale(base, glm::vec3(0.12f, 0.08f, 0.55f));
+                glm::mat4 blade_a_mvp = projection * view * blade_a;
+                glm::mat4 blade_b_mvp = projection * view * blade_b;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(blade_a_mvp));
+                glUniform3f(color_location, projectile.color.r, projectile.color.g, projectile.color.b);
+                glBindVertexArray(cube_vao);
+                glDrawArrays(GL_TRIANGLES, 0, 36);
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(blade_b_mvp));
+                glDrawArrays(GL_TRIANGLES, 0, 36);
+                glBindVertexArray(0);
+                continue;
+            }
             glm::mat4 proj_model = glm::translate(
                 glm::mat4(1.0f),
                 projectile.position);
@@ -6514,6 +6910,23 @@ struct Obstacle {
             glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(proj_mvp));
             glUniform3f(color_location, projectile.color.r, projectile.color.g, projectile.color.b);
             glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+        }
+
+        for (const Boomerang& boomerang : boomerangs) {
+            glm::mat4 base = glm::translate(glm::mat4(1.0f), boomerang.position);
+            base = glm::rotate(base, boomerang.spin, glm::vec3(0.0f, 1.0f, 0.0f));
+            glm::mat4 wing_a = glm::scale(base, glm::vec3(0.7f, 0.12f, 0.2f));
+            glm::mat4 wing_b = glm::rotate(base, glm::radians(60.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+            wing_b = glm::scale(wing_b, glm::vec3(0.7f, 0.12f, 0.2f));
+            glm::mat4 wing_a_mvp = projection * view * wing_a;
+            glm::mat4 wing_b_mvp = projection * view * wing_b;
+            glUniform3f(color_location, 0.95f, 0.85f, 0.35f);
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(wing_a_mvp));
+            glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(wing_b_mvp));
             glDrawArrays(GL_TRIANGLES, 0, 36);
             glBindVertexArray(0);
         }
@@ -7015,8 +7428,12 @@ struct Obstacle {
                 int barracks_cost = static_cast<int>(std::ceil(balance.barracks_base * std::pow(balance.barracks_growth, barracks_level - 1) * town_mult));
                 int armory_cost = static_cast<int>(std::ceil(balance.armory_base * std::pow(balance.armory_growth, armory_level - 1) * town_mult));
                 int watch_cost = static_cast<int>(std::ceil(balance.watch_base * std::pow(balance.watch_growth, watch_level - 1) * town_mult));
-                float panel_w = 300.0f;
-                float panel_h = 170.0f;
+                int gatling_level = town.gatling_level + 1;
+                int gatling_cost = static_cast<int>(std::ceil(220.0f * std::pow(1.6f, gatling_level - 1) * town_mult));
+                bool gatling_unlocked = IsUnlocked(UnlockableId::GatlingTower, run_state);
+                Requirement gatling_req = GetRequirement(UnlockableId::GatlingTower);
+                float panel_w = 320.0f;
+                float panel_h = 235.0f;
                 float panel_x = margin;
                 float panel_y = time_text_y - panel_h - font_height;
                 glUniform1f(alpha_location, 0.75f);
@@ -7069,6 +7486,28 @@ struct Obstacle {
                 cost_color = points >= watch_cost ? ui_white : ui_dim;
                 draw_text_with_font(ui_font_small, text_x, y,
                                     "Cost " + std::to_string(watch_cost), cost_color, ui_projection);
+                y -= 24.0f;
+                SDL_Color gatling_title = gatling_unlocked ? ui_white : ui_dim;
+                draw_text_with_font(ui_font_small, text_x, y,
+                                    "4) Gatling Tower", gatling_title, ui_projection);
+                y -= 18.0f;
+                if (!gatling_unlocked) {
+                    std::string lock_text = "Locked: Capture " + std::to_string(gatling_req.value) +
+                        " towns (" + std::to_string(run_state.towns_captured_count) + "/" +
+                        std::to_string(gatling_req.value) + ")";
+                    draw_text_with_font(ui_font_small, text_x, y, lock_text, ui_white, ui_projection);
+                } else {
+                    draw_text_with_font(ui_font_small, text_x, y,
+                                        "Level " + std::to_string(town.gatling_level) +
+                                            "  Rapid fire bolts",
+                                        ui_white, ui_projection);
+                }
+                y -= 18.0f;
+                if (gatling_unlocked) {
+                    cost_color = points >= gatling_cost ? ui_white : ui_dim;
+                    draw_text_with_font(ui_font_small, text_x, y,
+                                        "Cost " + std::to_string(gatling_cost), cost_color, ui_projection);
+                }
             }
         }
 
