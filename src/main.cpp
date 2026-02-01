@@ -2230,6 +2230,130 @@ int main() {
         int platform_index = -1;
     };
 
+    enum class CutsceneStepType {
+        ShowText,
+        WaitForKey,
+        SetGameMode,
+        End
+    };
+
+    enum class CutsceneMode {
+        Normal,
+        Paused,
+        Slow
+    };
+
+    struct CutsceneStep {
+        CutsceneStepType type = CutsceneStepType::ShowText;
+        std::string title;
+        std::string body;
+        CutsceneMode mode = CutsceneMode::Normal;
+    };
+
+    enum class CutsceneId {
+        None,
+        Tutorial,
+        FirstTown,
+        FirstWatchtower,
+        TownMenu,
+        WorldLore
+    };
+
+    struct CutsceneManager {
+        bool active = false;
+        bool awaiting_input = false;
+        bool modal = false;
+        CutsceneId id = CutsceneId::None;
+        CutsceneMode mode = CutsceneMode::Normal;
+        std::vector<CutsceneStep> steps;
+        size_t step_index = 0;
+        std::string current_title;
+        std::string current_body;
+
+        void Reset() {
+            active = false;
+            awaiting_input = false;
+            modal = false;
+            id = CutsceneId::None;
+            mode = CutsceneMode::Normal;
+            steps.clear();
+            step_index = 0;
+            current_title.clear();
+            current_body.clear();
+        }
+
+        bool IsActive() const {
+            return active;
+        }
+
+        float TimeScale() const {
+            if (!active) {
+                return 1.0f;
+            }
+            if (mode == CutsceneMode::Paused) {
+                return 0.0f;
+            }
+            if (mode == CutsceneMode::Slow) {
+                return 0.2f;
+            }
+            return 1.0f;
+        }
+
+        void Start(CutsceneId new_id, std::vector<CutsceneStep> new_steps) {
+            Reset();
+            active = true;
+            modal = true;
+            id = new_id;
+            steps = std::move(new_steps);
+            step_index = 0;
+            Advance();
+        }
+
+        void Advance() {
+            awaiting_input = false;
+            while (step_index < steps.size()) {
+                CutsceneStep& step = steps[step_index];
+                if (step.type == CutsceneStepType::ShowText) {
+                    current_title = step.title;
+                    current_body = step.body;
+                    step_index += 1;
+                    continue;
+                }
+                if (step.type == CutsceneStepType::SetGameMode) {
+                    mode = step.mode;
+                    step_index += 1;
+                    continue;
+                }
+                if (step.type == CutsceneStepType::WaitForKey) {
+                    awaiting_input = true;
+                    return;
+                }
+                if (step.type == CutsceneStepType::End) {
+                    Reset();
+                    return;
+                }
+                step_index += 1;
+            }
+            Reset();
+        }
+
+        bool HandleKey(SDL_Keycode key) {
+            if (!active) {
+                return false;
+            }
+            if (key == SDLK_ESCAPE) {
+                Reset();
+                return true;
+            }
+            if ((key == SDLK_SPACE || key == SDLK_RETURN) && awaiting_input) {
+                step_index += 1;
+                Advance();
+                return true;
+            }
+            return true;
+        }
+    };
+
     enum class UnlockableId {
         GatlingTower
     };
@@ -2245,6 +2369,11 @@ int main() {
 
     struct RunState {
         int towns_captured_count = 0;
+        bool played_tutorial = false;
+        bool played_first_town = false;
+        bool played_first_watchtower = false;
+        bool played_town_menu = false;
+        bool played_world_lore = false;
     };
 
     struct Ally {
@@ -2485,6 +2614,8 @@ struct Obstacle {
     int town_naming_index = -1;
     std::string town_naming_text;
     int town_name_counter = 0;
+    int pending_town_name_index = -1;
+    CutsceneManager cutscene;
     bool floor_wireframe_debug = false;
     int floor_mode = 1;
     float floor_grid_scale = 0.18f;
@@ -3220,6 +3351,56 @@ struct Obstacle {
         return static_cast<int>(towns.size()) - 1;
     };
 
+    auto build_cutscene = [&](CutsceneId id) {
+        std::vector<CutsceneStep> steps;
+        if (id == CutsceneId::Tutorial) {
+            steps.push_back(CutsceneStep{CutsceneStepType::SetGameMode, "", "", CutsceneMode::Paused});
+            steps.push_back(CutsceneStep{CutsceneStepType::ShowText, "Welcome",
+                "Floating platforms are up for grabs. Capture homes to claim a platform."});
+            steps.push_back(CutsceneStep{CutsceneStepType::WaitForKey});
+            steps.push_back(CutsceneStep{CutsceneStepType::ShowText, "Capture",
+                "Select a friendly unit and press C to order them to capture nearby homes."});
+            steps.push_back(CutsceneStep{CutsceneStepType::WaitForKey});
+            steps.push_back(CutsceneStep{CutsceneStepType::ShowText, "Towns",
+                "When all homes are captured, the platform falls and becomes a town with upgrades."});
+            steps.push_back(CutsceneStep{CutsceneStepType::WaitForKey});
+            steps.push_back(CutsceneStep{CutsceneStepType::ShowText, "Minimap",
+                "Use the minimap to track towns, enemies, and powerups."});
+            steps.push_back(CutsceneStep{CutsceneStepType::WaitForKey});
+            steps.push_back(CutsceneStep{CutsceneStepType::SetGameMode, "", "", CutsceneMode::Normal});
+            steps.push_back(CutsceneStep{CutsceneStepType::End});
+        } else if (id == CutsceneId::FirstTown) {
+            steps.push_back(CutsceneStep{CutsceneStepType::SetGameMode, "", "", CutsceneMode::Paused});
+            steps.push_back(CutsceneStep{CutsceneStepType::ShowText, "Town Founded",
+                "This town will produce allies and defenses once upgraded."});
+            steps.push_back(CutsceneStep{CutsceneStepType::WaitForKey});
+            steps.push_back(CutsceneStep{CutsceneStepType::SetGameMode, "", "", CutsceneMode::Normal});
+            steps.push_back(CutsceneStep{CutsceneStepType::End});
+        } else if (id == CutsceneId::FirstWatchtower) {
+            steps.push_back(CutsceneStep{CutsceneStepType::SetGameMode, "", "", CutsceneMode::Paused});
+            steps.push_back(CutsceneStep{CutsceneStepType::ShowText, "Watchtower Online",
+                "Watchtowers auto-fire at nearby enemies and get faster with upgrades."});
+            steps.push_back(CutsceneStep{CutsceneStepType::WaitForKey});
+            steps.push_back(CutsceneStep{CutsceneStepType::SetGameMode, "", "", CutsceneMode::Normal});
+            steps.push_back(CutsceneStep{CutsceneStepType::End});
+        } else if (id == CutsceneId::TownMenu) {
+            steps.push_back(CutsceneStep{CutsceneStepType::SetGameMode, "", "", CutsceneMode::Paused});
+            steps.push_back(CutsceneStep{CutsceneStepType::ShowText, "Town Upgrades",
+                "Press T near a town to open the upgrade menu."});
+            steps.push_back(CutsceneStep{CutsceneStepType::WaitForKey});
+            steps.push_back(CutsceneStep{CutsceneStepType::SetGameMode, "", "", CutsceneMode::Normal});
+            steps.push_back(CutsceneStep{CutsceneStepType::End});
+        } else if (id == CutsceneId::WorldLore) {
+            steps.push_back(CutsceneStep{CutsceneStepType::SetGameMode, "", "", CutsceneMode::Paused});
+            steps.push_back(CutsceneStep{CutsceneStepType::ShowText, "Skyfall Archives",
+                "Platforms drift, towns rise, and the old world watches from below."});
+            steps.push_back(CutsceneStep{CutsceneStepType::WaitForKey});
+            steps.push_back(CutsceneStep{CutsceneStepType::SetGameMode, "", "", CutsceneMode::Normal});
+            steps.push_back(CutsceneStep{CutsceneStepType::End});
+        }
+        return steps;
+    };
+
     auto GetRequirement = [&](UnlockableId id) -> Requirement {
         switch (id) {
             case UnlockableId::GatlingTower:
@@ -3373,15 +3554,27 @@ struct Obstacle {
         coins_earned = 0;
         points = 0;
         run_state.towns_captured_count = 0;
+        run_state.played_tutorial = false;
+        run_state.played_first_town = false;
+        run_state.played_first_watchtower = false;
+        run_state.played_town_menu = false;
+        run_state.played_world_lore = false;
         victory = false;
         town_naming_active = false;
         town_naming_index = -1;
         town_naming_text.clear();
         SDL_StopTextInput();
+        pending_town_name_index = -1;
+        cutscene.Reset();
         freeze_timer = 0.0f;
         nuke_cooldown_timer = 0.0f;
         enemy_spawner_timer = 0.0f;
         assign_enemy_spawners(4);
+
+        if (!run_state.played_tutorial) {
+            cutscene.Start(CutsceneId::Tutorial, build_cutscene(CutsceneId::Tutorial));
+            run_state.played_tutorial = true;
+        }
     };
 
     auto end_run = [&](bool won) {
@@ -3450,6 +3643,51 @@ struct Obstacle {
         glUseProgram(program);
         glUniform1f(alpha_location, 1.0f);
         glUniform1i(use_vertex_color_location, 0);
+    };
+
+    auto wrap_text = [&](TTF_Font* font, const std::string& text, float max_width) {
+        std::vector<std::string> lines;
+        if (!font || text.empty()) {
+            return lines;
+        }
+        std::string line;
+        std::string word;
+        auto flush_word = [&]() {
+            if (word.empty()) {
+                return;
+            }
+            std::string test = line.empty() ? word : line + " " + word;
+            int w = 0;
+            int h = 0;
+            TTF_SizeUTF8(font, test.c_str(), &w, &h);
+            if (w > static_cast<int>(max_width) && !line.empty()) {
+                lines.push_back(line);
+                line = word;
+            } else {
+                line = test;
+            }
+            word.clear();
+        };
+        for (char c : text) {
+            if (c == '\n') {
+                flush_word();
+                if (!line.empty()) {
+                    lines.push_back(line);
+                    line.clear();
+                } else {
+                    lines.push_back("");
+                }
+            } else if (c == ' ') {
+                flush_word();
+            } else {
+                word.push_back(c);
+            }
+        }
+        flush_word();
+        if (!line.empty()) {
+            lines.push_back(line);
+        }
+        return lines;
     };
 
     auto draw_text = [&](float x, float y, const std::string& text, SDL_Color color,
@@ -3530,13 +3768,17 @@ struct Obstacle {
     Uint64 last_ticks = SDL_GetPerformanceCounter();
     bool running = true;
     while (running) {
-        bool want_relative = state == GameState::Running && camera_look_active;
+        bool want_relative = state == GameState::Running && camera_look_active && !cutscene.IsActive();
         SDL_SetRelativeMouseMode(want_relative ? SDL_TRUE : SDL_FALSE);
         SDL_ShowCursor(want_relative ? SDL_DISABLE : SDL_ENABLE);
         Uint64 current_ticks = SDL_GetPerformanceCounter();
         float delta_time = static_cast<float>(current_ticks - last_ticks) /
                            static_cast<float>(SDL_GetPerformanceFrequency());
         last_ticks = current_ticks;
+        float real_delta_time = delta_time;
+        if (cutscene.IsActive()) {
+            delta_time *= cutscene.TimeScale();
+        }
 
         auto project_to_screen = [&](const glm::vec3& world_pos, float& out_x, float& out_y) {
             glm::mat4 projection = glm::perspective(
@@ -3643,6 +3885,11 @@ struct Obstacle {
                         SDL_StopTextInput();
                     }
                     continue;
+                }
+                if (cutscene.IsActive()) {
+                    if (cutscene.HandleKey(key)) {
+                        continue;
+                    }
                 }
                 if (state == GameState::MainMenu) {
                     if (key == SDLK_UP || key == SDLK_w) {
@@ -3820,9 +4067,19 @@ struct Obstacle {
                         if (guard_index >= 0) {
                             command_units(UnitState::Guard, guard_index);
                         }
+                    } else if (key == SDLK_F1 && (event.key.keysym.mod & KMOD_SHIFT)) {
+                        run_state.played_tutorial = false;
+                        run_state.played_first_town = false;
+                        run_state.played_first_watchtower = false;
+                        run_state.played_town_menu = false;
+                        run_state.played_world_lore = false;
                     } else if (key == SDLK_F1) {
-                        house_wireframe_debug = !house_wireframe_debug;
+                        cutscene.Start(CutsceneId::Tutorial, build_cutscene(CutsceneId::Tutorial));
                     } else if (key == SDLK_F2) {
+                        cutscene.Start(CutsceneId::WorldLore, build_cutscene(CutsceneId::WorldLore));
+                    } else if (key == SDLK_F9) {
+                        house_wireframe_debug = !house_wireframe_debug;
+                    } else if (key == SDLK_F10) {
                         spawn_debug = !spawn_debug;
                     } else if (key == SDLK_F3) {
                         floor_wireframe_debug = !floor_wireframe_debug;
@@ -3899,6 +4156,10 @@ struct Obstacle {
                                 town.ui_open = false;
                             }
                             towns[best_index].ui_open = next_state;
+                            if (next_state && !run_state.played_town_menu) {
+                                cutscene.Start(CutsceneId::TownMenu, build_cutscene(CutsceneId::TownMenu));
+                                run_state.played_town_menu = true;
+                            }
                         }
                     } else if (key == SDLK_1 || key == SDLK_2 || key == SDLK_3 || key == SDLK_4) {
                         int open_town_index = -1;
@@ -3931,6 +4192,10 @@ struct Obstacle {
                             } else if (key_index == 2 && points >= watch_cost) {
                                 points -= watch_cost;
                                 town.watchtower_level += 1;
+                                if (town.watchtower_level == 1 && !run_state.played_first_watchtower) {
+                                    cutscene.Start(CutsceneId::FirstWatchtower, build_cutscene(CutsceneId::FirstWatchtower));
+                                    run_state.played_first_watchtower = true;
+                                }
                             } else if (key_index == 3 && gatling_unlocked && points >= gatling_cost) {
                                 points -= gatling_cost;
                                 if (town.gatling_level == 0 && town.gatling_building_index < 0) {
@@ -4117,6 +4382,9 @@ struct Obstacle {
                     }
                 }
             } else if (event.type == SDL_MOUSEBUTTONDOWN) {
+                if (cutscene.IsActive()) {
+                    continue;
+                }
                 if (event.button.button == SDL_BUTTON_RIGHT && state == GameState::Running) {
                     camera_look_active = true;
                 } else if (event.button.button == SDL_BUTTON_LEFT &&
@@ -4128,6 +4396,9 @@ struct Obstacle {
                     camera_look_active = false;
                 }
             } else if (event.type == SDL_MOUSEMOTION) {
+                if (cutscene.IsActive()) {
+                    continue;
+                }
                 if (state == GameState::Running && camera_look_active) {
                     const float sensitivity = 0.0018f;
                     camera_yaw += static_cast<float>(event.motion.xrel) * sensitivity;
@@ -4144,17 +4415,20 @@ struct Obstacle {
             }
         }
 
-        if (state != GameState::Running) {
-            camera_look_active = false;
-            player_move_amount = 0.0f;
-        }
-
-        if (state == GameState::Running) {
-            run_time += delta_time;
-            if (run_time >= win_time) {
-                end_run(true);
+            if (state != GameState::Running) {
+                camera_look_active = false;
+                player_move_amount = 0.0f;
             }
+
             if (state == GameState::Running) {
+                if (cutscene.IsActive()) {
+                    camera_look_active = false;
+                }
+                run_time += delta_time;
+                if (run_time >= win_time) {
+                    end_run(true);
+                }
+                if (!cutscene.IsActive()) {
             const Uint8* keys = SDL_GetKeyboardState(nullptr);
             glm::vec3 input(0.0f);
             if (keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) {
@@ -4312,6 +4586,9 @@ struct Obstacle {
                     player_velocity = (player_position - prev_player_position) / delta_time;
                 } else {
                     player_velocity = glm::vec3(0.0f);
+                }
+                } else {
+                    player_move_amount = 0.0f;
                 }
 
             float spawn_interval = glm::max(0.5f, base_spawn_interval - player_level * 0.05f);
@@ -4483,10 +4760,18 @@ struct Obstacle {
                         if (new_town_index >= 0 &&
                             new_town_index < static_cast<int>(towns.size()) &&
                             towns[new_town_index].name.empty()) {
-                            town_naming_active = true;
-                            town_naming_index = new_town_index;
-                            town_naming_text.clear();
-                            SDL_StartTextInput();
+                            if (cutscene.IsActive()) {
+                                pending_town_name_index = new_town_index;
+                            } else {
+                                town_naming_active = true;
+                                town_naming_index = new_town_index;
+                                town_naming_text.clear();
+                                SDL_StartTextInput();
+                            }
+                        }
+                        if (!run_state.played_first_town) {
+                            cutscene.Start(CutsceneId::FirstTown, build_cutscene(CutsceneId::FirstTown));
+                            run_state.played_first_town = true;
                         }
                     }
                 }
@@ -4498,6 +4783,15 @@ struct Obstacle {
 
             for (Town& town : towns) {
                 town.production_timer += delta_time;
+            }
+            if (!cutscene.IsActive() && !town_naming_active && pending_town_name_index >= 0) {
+                if (pending_town_name_index < static_cast<int>(towns.size())) {
+                    town_naming_active = true;
+                    town_naming_index = pending_town_name_index;
+                    town_naming_text.clear();
+                    SDL_StartTextInput();
+                }
+                pending_town_name_index = -1;
             }
             for (Town& town : towns) {
                 if (!town.ui_open) {
@@ -5736,7 +6030,6 @@ struct Obstacle {
 
             if (player_health <= 0) {
                 end_run(false);
-            }
             }
         }
 
@@ -7661,6 +7954,32 @@ struct Obstacle {
                 draw_text_centered(panel_x, panel_y + 14.0f, panel_w, 18.0f,
                                    "Enter to confirm, Esc for default", ui_dim, ui_projection);
             }
+        }
+
+        if (cutscene.IsActive()) {
+            float panel_w = 520.0f;
+            float panel_h = 180.0f;
+            float panel_x = (window_width - panel_w) * 0.5f;
+            float panel_y = window_height * 0.14f;
+            glUniform1f(alpha_location, 0.82f);
+            draw_ui_quad(panel_x, panel_y, panel_w, panel_h,
+                         glm::vec3(0.05f, 0.06f, 0.10f), ui_projection);
+            glUniform1f(alpha_location, 1.0f);
+            draw_text_with_font(ui_font, panel_x + 18.0f, panel_y + panel_h - 40.0f,
+                                cutscene.current_title, ui_white, ui_projection);
+            float body_x = panel_x + 18.0f;
+            float body_y = panel_y + panel_h - 74.0f;
+            float body_w = panel_w - 36.0f;
+            auto lines = wrap_text(ui_font_small, cutscene.current_body, body_w);
+            for (const std::string& line : lines) {
+                draw_text_with_font(ui_font_small, body_x, body_y, line, ui_white, ui_projection);
+                body_y -= 18.0f;
+                if (body_y < panel_y + 36.0f) {
+                    break;
+                }
+            }
+            draw_text_with_font(ui_font_small, panel_x + panel_w - 180.0f, panel_y + 18.0f,
+                                "Press Space to continue", ui_dim, ui_projection);
         }
 
         if (state == GameState::Running) {
