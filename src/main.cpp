@@ -2220,6 +2220,8 @@ int main() {
         int watchtower_level = 0;
         int gatling_level = 0;
         int gatling_building_index = -1;
+        std::string name;
+        int name_index = 0;
         glm::vec2 center = glm::vec2(0.0f);
         float radius = 0.0f;
         int wall_open_a = 0;
@@ -2477,6 +2479,12 @@ struct Obstacle {
     bool spawn_debug = false;
     glm::vec3 last_spawn_debug_pos(0.0f);
     int last_spawn_debug_platform = -1;
+    bool minimap_visible = true;
+    float minimap_radius = 28.0f;
+    bool town_naming_active = false;
+    int town_naming_index = -1;
+    std::string town_naming_text;
+    int town_name_counter = 0;
     bool floor_wireframe_debug = false;
     int floor_mode = 1;
     float floor_grid_scale = 0.18f;
@@ -3140,13 +3148,13 @@ struct Obstacle {
         return best_index;
     };
 
-    auto spawn_town_for_platform = [&](int platform_index) {
+    auto spawn_town_for_platform = [&](int platform_index) -> int {
         if (platform_index < 0 || platform_index >= static_cast<int>(platforms.size())) {
-            return;
+            return -1;
         }
         for (const Town& town : towns) {
             if (town.platform_index == platform_index) {
-                return;
+                return -1;
             }
         }
         const Platform& platform = platforms[platform_index];
@@ -3205,8 +3213,11 @@ struct Obstacle {
             town.wall_open_b = (town.wall_open_a + 1) % 4;
         }
         town.platform_index = platform_index;
+        town.name.clear();
+        town.name_index = ++town_name_counter;
         towns.push_back(town);
         rebuild_obstacles();
+        return static_cast<int>(towns.size()) - 1;
     };
 
     auto GetRequirement = [&](UnlockableId id) -> Requirement {
@@ -3363,6 +3374,10 @@ struct Obstacle {
         points = 0;
         run_state.towns_captured_count = 0;
         victory = false;
+        town_naming_active = false;
+        town_naming_index = -1;
+        town_naming_text.clear();
+        SDL_StopTextInput();
         freeze_timer = 0.0f;
         nuke_cooldown_timer = 0.0f;
         enemy_spawner_timer = 0.0f;
@@ -3597,6 +3612,38 @@ struct Obstacle {
                 glViewport(0, 0, window_width, window_height);
             } else if (event.type == SDL_KEYDOWN) {
                 SDL_Keycode key = event.key.keysym.sym;
+                if (town_naming_active) {
+                    if (key == SDLK_BACKSPACE) {
+                        if (!town_naming_text.empty()) {
+                            town_naming_text.pop_back();
+                        }
+                    } else if (key == SDLK_RETURN || key == SDLK_SPACE) {
+                        if (town_naming_index >= 0 &&
+                            town_naming_index < static_cast<int>(towns.size())) {
+                            if (town_naming_text.empty()) {
+                                towns[town_naming_index].name =
+                                    "Town " + std::to_string(towns[town_naming_index].name_index);
+                            } else {
+                                towns[town_naming_index].name = town_naming_text;
+                            }
+                        }
+                        town_naming_active = false;
+                        town_naming_index = -1;
+                        town_naming_text.clear();
+                        SDL_StopTextInput();
+                    } else if (key == SDLK_ESCAPE) {
+                        if (town_naming_index >= 0 &&
+                            town_naming_index < static_cast<int>(towns.size())) {
+                            towns[town_naming_index].name =
+                                "Town " + std::to_string(towns[town_naming_index].name_index);
+                        }
+                        town_naming_active = false;
+                        town_naming_index = -1;
+                        town_naming_text.clear();
+                        SDL_StopTextInput();
+                    }
+                    continue;
+                }
                 if (state == GameState::MainMenu) {
                     if (key == SDLK_UP || key == SDLK_w) {
                         main_menu_index = (main_menu_index + 3) % 4;
@@ -3781,6 +3828,12 @@ struct Obstacle {
                         floor_wireframe_debug = !floor_wireframe_debug;
                     } else if (key == SDLK_F4) {
                         floor_mode = (floor_mode + 1) % 3;
+                    } else if (key == SDLK_m) {
+                        minimap_visible = !minimap_visible;
+                    } else if (key == SDLK_LEFTBRACKET) {
+                        minimap_radius = glm::max(12.0f, minimap_radius - 4.0f);
+                    } else if (key == SDLK_RIGHTBRACKET) {
+                        minimap_radius = glm::min(60.0f, minimap_radius + 4.0f);
                     } else if (key == SDLK_c) {
                         if (selected_ally_id != -1) {
                             int platform_index = find_platform_index_for_position(player_position);
@@ -4080,6 +4133,10 @@ struct Obstacle {
                     camera_yaw += static_cast<float>(event.motion.xrel) * sensitivity;
                     camera_pitch -= static_cast<float>(event.motion.yrel) * sensitivity;
                     camera_pitch = glm::clamp(camera_pitch, glm::radians(-45.0f), glm::radians(10.0f));
+                }
+            } else if (event.type == SDL_TEXTINPUT) {
+                if (town_naming_active && town_naming_text.size() < 16) {
+                    town_naming_text += event.text.text;
                 }
             } else if (event.type == SDL_MOUSEWHEEL && state == GameState::Running) {
                 camera_distance -= static_cast<float>(event.wheel.y) * 0.6f;
@@ -4419,10 +4476,18 @@ struct Obstacle {
                 } else if (platform.state == PlatformState::Landed) {
                     platform.landed_timer += delta_time;
                     if (platform.landed_timer >= 0.35f) {
-                        spawn_town_for_platform(p);
+                        int new_town_index = spawn_town_for_platform(p);
                         platform.state = PlatformState::ConvertedToTown;
                         rebuild_obstacles();
                         run_state.towns_captured_count += 1;
+                        if (new_town_index >= 0 &&
+                            new_town_index < static_cast<int>(towns.size()) &&
+                            towns[new_town_index].name.empty()) {
+                            town_naming_active = true;
+                            town_naming_index = new_town_index;
+                            town_naming_text.clear();
+                            SDL_StartTextInput();
+                        }
                     }
                 }
             }
@@ -7411,6 +7476,75 @@ struct Obstacle {
                 draw_text(margin + 6.0f, time_text_y - font_height * 2.0f - 12.0f,
                           label, ui_white, ui_projection);
             }
+
+            if (minimap_visible) {
+                float map_size = 180.0f;
+                float map_x = window_width - margin - map_size;
+                float map_y = margin;
+                glUniform1f(alpha_location, 0.7f);
+                draw_ui_quad(map_x, map_y, map_size, map_size,
+                             glm::vec3(0.04f, 0.05f, 0.08f), ui_projection);
+                glUniform1f(alpha_location, 1.0f);
+
+                auto world_to_minimap = [&](const glm::vec2& world, float& out_x, float& out_y) {
+                    glm::vec2 delta = world - glm::vec2(player_position.x, player_position.z);
+                    if (glm::dot(delta, delta) > minimap_radius * minimap_radius) {
+                        return false;
+                    }
+                    float u = (delta.x / (minimap_radius * 2.0f)) + 0.5f;
+                    float v = (delta.y / (minimap_radius * 2.0f)) + 0.5f;
+                    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) {
+                        return false;
+                    }
+                    out_x = map_x + u * map_size;
+                    out_y = map_y + (1.0f - v) * map_size;
+                    return true;
+                };
+
+                draw_ui_quad(map_x + map_size * 0.5f - 3.5f, map_y + map_size * 0.5f - 3.5f,
+                             7.0f, 7.0f, glm::vec3(0.15f, 0.95f, 0.95f), ui_projection);
+
+                for (const Town& town : towns) {
+                    if (town.platform_index < 0 ||
+                        town.platform_index >= static_cast<int>(platforms.size()) ||
+                        platforms[town.platform_index].state != PlatformState::ConvertedToTown) {
+                        continue;
+                    }
+                    float sx = 0.0f;
+                    float sy = 0.0f;
+                    if (!world_to_minimap(town.center, sx, sy)) {
+                        continue;
+                    }
+                    draw_ui_quad(sx - 4.0f, sy - 4.0f, 8.0f, 8.0f,
+                                 glm::vec3(0.95f, 0.35f, 0.85f), ui_projection);
+                    if (!town.name.empty()) {
+                        draw_text_with_font(ui_font_small, sx + 6.0f, sy - 10.0f, town.name,
+                                            ui_white, ui_projection);
+                    }
+                }
+
+                for (const Enemy& enemy : enemies) {
+                    float sx = 0.0f;
+                    float sy = 0.0f;
+                    if (!world_to_minimap(glm::vec2(enemy.position.x, enemy.position.z), sx, sy)) {
+                        continue;
+                    }
+                    glm::vec3 color = enemy.elite ? glm::vec3(0.95f, 0.75f, 0.20f)
+                                                  : glm::vec3(0.95f, 0.35f, 0.20f);
+                    draw_ui_quad(sx - 2.0f, sy - 2.0f, 4.0f, 4.0f, color, ui_projection);
+                }
+
+                for (const Pickup& pickup : pickups) {
+                    float sx = 0.0f;
+                    float sy = 0.0f;
+                    if (!world_to_minimap(glm::vec2(pickup.position.x, pickup.position.z), sx, sy)) {
+                        continue;
+                    }
+                    draw_ui_quad(sx - 3.0f, sy - 3.0f, 6.0f, 6.0f,
+                                 glm::vec3(0.95f, 0.90f, 0.35f), ui_projection);
+                }
+            }
+
             int open_town_index = -1;
             for (int i = 0; i < static_cast<int>(towns.size()); ++i) {
                 if (towns[i].ui_open) {
@@ -7508,6 +7642,24 @@ struct Obstacle {
                     draw_text_with_font(ui_font_small, text_x, y,
                                         "Cost " + std::to_string(gatling_cost), cost_color, ui_projection);
                 }
+            }
+
+            if (town_naming_active) {
+                float panel_w = 360.0f;
+                float panel_h = 140.0f;
+                float panel_x = (window_width - panel_w) * 0.5f;
+                float panel_y = (window_height - panel_h) * 0.5f;
+                glUniform1f(alpha_location, 0.8f);
+                draw_ui_quad(panel_x, panel_y, panel_w, panel_h,
+                             glm::vec3(0.05f, 0.06f, 0.10f), ui_projection);
+                glUniform1f(alpha_location, 1.0f);
+                draw_text_centered(panel_x, panel_y + panel_h - 40.0f, panel_w, 24.0f,
+                                   "Name Town", ui_white, ui_projection);
+                std::string shown = town_naming_text.empty() ? "_" : town_naming_text;
+                draw_text_centered(panel_x, panel_y + panel_h - 78.0f, panel_w, 24.0f,
+                                   shown, ui_white, ui_projection);
+                draw_text_centered(panel_x, panel_y + 14.0f, panel_w, 18.0f,
+                                   "Enter to confirm, Esc for default", ui_dim, ui_projection);
             }
         }
 
