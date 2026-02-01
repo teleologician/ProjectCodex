@@ -39,6 +39,26 @@ struct MeshBuilder {
     }
 };
 
+struct LitMeshBuilder {
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals;
+
+    void add_triangle(const glm::vec3& a, const glm::vec3& b, const glm::vec3& c) {
+        glm::vec3 n = glm::normalize(glm::cross(b - a, c - a));
+        positions.push_back(a);
+        positions.push_back(b);
+        positions.push_back(c);
+        normals.push_back(n);
+        normals.push_back(n);
+        normals.push_back(n);
+    }
+
+    void add_quad(const glm::vec3& a, const glm::vec3& b, const glm::vec3& c, const glm::vec3& d) {
+        add_triangle(a, b, c);
+        add_triangle(a, c, d);
+    }
+};
+
 std::vector<float> FlattenPositions(const std::vector<glm::vec3>& positions) {
     std::vector<float> data;
     data.reserve(positions.size() * 3);
@@ -75,6 +95,49 @@ void AddBox(MeshBuilder& builder, const glm::vec3& half, const glm::mat4& transf
     builder.add_quad(corners[1], corners[5], corners[6], corners[2]);
     builder.add_quad(corners[3], corners[2], corners[6], corners[7]);
     builder.add_quad(corners[4], corners[5], corners[1], corners[0]);
+}
+
+void AddLitBox(LitMeshBuilder& builder, const glm::vec3& half, const glm::mat4& transform) {
+    glm::vec3 corners[8] = {
+        {-half.x, -half.y, -half.z},
+        { half.x, -half.y, -half.z},
+        { half.x,  half.y, -half.z},
+        {-half.x,  half.y, -half.z},
+        {-half.x, -half.y,  half.z},
+        { half.x, -half.y,  half.z},
+        { half.x,  half.y,  half.z},
+        {-half.x,  half.y,  half.z}
+    };
+    for (glm::vec3& c : corners) {
+        c = TransformPoint(transform, c);
+    }
+    builder.add_quad(corners[0], corners[1], corners[2], corners[3]);
+    builder.add_quad(corners[5], corners[4], corners[7], corners[6]);
+    builder.add_quad(corners[4], corners[0], corners[3], corners[7]);
+    builder.add_quad(corners[1], corners[5], corners[6], corners[2]);
+    builder.add_quad(corners[3], corners[2], corners[6], corners[7]);
+    builder.add_quad(corners[4], corners[5], corners[1], corners[0]);
+}
+
+void AddLitRoof(LitMeshBuilder& builder, float half_x, float half_z, float height, const glm::mat4& transform) {
+    glm::vec3 a(-half_x, 0.0f, -half_z);
+    glm::vec3 b(half_x, 0.0f, -half_z);
+    glm::vec3 c(half_x, 0.0f, half_z);
+    glm::vec3 d(-half_x, 0.0f, half_z);
+    glm::vec3 ridge_front(0.0f, height, -half_z);
+    glm::vec3 ridge_back(0.0f, height, half_z);
+
+    a = TransformPoint(transform, a);
+    b = TransformPoint(transform, b);
+    c = TransformPoint(transform, c);
+    d = TransformPoint(transform, d);
+    ridge_front = TransformPoint(transform, ridge_front);
+    ridge_back = TransformPoint(transform, ridge_back);
+
+    builder.add_quad(a, ridge_front, ridge_back, d);
+    builder.add_quad(ridge_front, b, c, ridge_back);
+    builder.add_triangle(a, b, ridge_front);
+    builder.add_triangle(d, ridge_back, c);
 }
 
 void AddCylinder(MeshBuilder& builder, float radius, float height, int segments, const glm::mat4& transform) {
@@ -159,18 +222,22 @@ struct RampTile {
     int dir; // 1:+X, 2:-X, 3:+Z, 4:-Z
     float base_height;
     float height;
+    int plateau_index = -1;
+    bool active = true;
 };
 
 struct Plateau {
     glm::vec2 center;
     glm::vec2 half;
     float height;
+    bool active = true;
 };
 
 static std::vector<Plateau> g_plateaus;
 static std::vector<RampTile> g_ramps;
 static std::vector<glm::vec3> g_rock_positions;
 static std::vector<glm::vec3> g_tree_positions;
+static std::vector<float> g_plateau_fall_offsets;
 static constexpr float g_ground_extent = 95.0f;
 static noise::module::Perlin g_base_noise;
 static noise::module::Perlin g_detail_noise;
@@ -574,6 +641,9 @@ bool PointInRect(const glm::vec2& p, const glm::vec2& center, const glm::vec2& h
 
 bool IsOnRamp(const glm::vec2& p) {
     for (const RampTile& ramp : g_ramps) {
+        if (!ramp.active) {
+            continue;
+        }
         if (PointInRect(p, ramp.center, ramp.half)) {
             return true;
         }
@@ -583,6 +653,9 @@ bool IsOnRamp(const glm::vec2& p) {
 
 bool IsOnPlateau(const glm::vec2& p) {
     for (const Plateau& plateau : g_plateaus) {
+        if (!plateau.active) {
+            continue;
+        }
         if (PointInRect(p, plateau.center, plateau.half)) {
             return true;
         }
@@ -592,6 +665,9 @@ bool IsOnPlateau(const glm::vec2& p) {
 
 const RampTile* FindRamp(const glm::vec2& p) {
     for (const RampTile& ramp : g_ramps) {
+        if (!ramp.active) {
+            continue;
+        }
         if (PointInRect(p, ramp.center, ramp.half)) {
             return &ramp;
         }
@@ -635,6 +711,9 @@ bool RampAllowsTransition(const glm::vec2& from, const glm::vec2& to, float marg
 
 bool IsNearRampEdge(const glm::vec2& p, float margin) {
     for (const RampTile& ramp : g_ramps) {
+        if (!ramp.active) {
+            continue;
+        }
         glm::vec2 min = ramp.center - ramp.half;
         glm::vec2 max = ramp.center + ramp.half;
         float dx = 0.0f;
@@ -658,6 +737,9 @@ bool IsNearRampEdge(const glm::vec2& p, float margin) {
 
 bool IsNearRampArea(const glm::vec2& p, float margin) {
     for (const RampTile& ramp : g_ramps) {
+        if (!ramp.active) {
+            continue;
+        }
         glm::vec2 min = ramp.center - ramp.half - glm::vec2(margin, margin);
         glm::vec2 max = ramp.center + ramp.half + glm::vec2(margin, margin);
         if (p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y) {
@@ -706,7 +788,12 @@ float RampHeightAt(const RampTile& ramp, const glm::vec2& p) {
         t = (max.y - p.y) / (max.y - min.y);
     }
     t = glm::clamp(t, 0.0f, 1.0f);
-    return ramp.base_height + t * ramp.height;
+    float height = ramp.base_height + t * ramp.height;
+    if (ramp.plateau_index >= 0 &&
+        ramp.plateau_index < static_cast<int>(g_plateau_fall_offsets.size())) {
+        height -= g_plateau_fall_offsets[ramp.plateau_index];
+    }
+    return height;
 }
 
 float BaseNoiseHeight(float x, float z) {
@@ -720,22 +807,41 @@ float BaseNoiseHeight(float x, float z) {
 float TerrainHeight(float x, float z) {
     glm::vec2 p(x, z);
     for (const RampTile& ramp : g_ramps) {
+        if (!ramp.active) {
+            continue;
+        }
         if (PointInRect(p, ramp.center, ramp.half)) {
             return RampHeightAt(ramp, p);
         }
     }
-    for (const Plateau& plateau : g_plateaus) {
+    for (int i = 0; i < static_cast<int>(g_plateaus.size()); ++i) {
+        const Plateau& plateau = g_plateaus[i];
+        if (!plateau.active) {
+            continue;
+        }
         if (PointInRect(p, plateau.center, plateau.half)) {
-            return plateau.height;
+            float height = plateau.height;
+            if (i < static_cast<int>(g_plateau_fall_offsets.size())) {
+                height -= g_plateau_fall_offsets[i];
+            }
+            return height;
         }
     }
     return BaseNoiseHeight(x, z);
 }
 
 float PlateauHeightAt(const glm::vec2& p) {
-    for (const Plateau& plateau : g_plateaus) {
+    for (int i = 0; i < static_cast<int>(g_plateaus.size()); ++i) {
+        const Plateau& plateau = g_plateaus[i];
+        if (!plateau.active) {
+            continue;
+        }
         if (PointInRect(p, plateau.center, plateau.half)) {
-            return plateau.height;
+            float height = plateau.height;
+            if (i < static_cast<int>(g_plateau_fall_offsets.size())) {
+                height -= g_plateau_fall_offsets[i];
+            }
+            return height;
         }
     }
     return 0.0f;
@@ -744,15 +850,26 @@ float PlateauHeightAt(const glm::vec2& p) {
 float TerrainHeightAt(float x, float z, float current_y) {
     glm::vec2 p(x, z);
     for (const RampTile& ramp : g_ramps) {
+        if (!ramp.active) {
+            continue;
+        }
         if (PointInRect(p, ramp.center, ramp.half)) {
             return RampHeightAt(ramp, p);
         }
     }
-    for (const Plateau& plateau : g_plateaus) {
+    for (int i = 0; i < static_cast<int>(g_plateaus.size()); ++i) {
+        const Plateau& plateau = g_plateaus[i];
+        if (!plateau.active) {
+            continue;
+        }
         if (PointInRect(p, plateau.center, plateau.half)) {
-            float snap_threshold = plateau.height * 0.55f;
+            float height = plateau.height;
+            if (i < static_cast<int>(g_plateau_fall_offsets.size())) {
+                height -= g_plateau_fall_offsets[i];
+            }
+            float snap_threshold = height * 0.55f;
             if (current_y >= snap_threshold) {
-                return plateau.height;
+                return height;
             }
             return BaseNoiseHeight(x, z);
         }
@@ -803,7 +920,7 @@ void GenerateTerrain(uint32_t seed) {
         float height = high ? 10.0f : 6.0f;
         glm::vec2 half = high ? glm::vec2(11.0f, 11.0f) : glm::vec2(9.0f, 9.0f);
         glm::vec2 center = cells[i] * spacing;
-        g_plateaus.push_back(Plateau{center, half, height});
+        g_plateaus.push_back(Plateau{center, half, height, true});
 
         std::array<int, 4> dirs = {1, 2, 3, 4};
         std::shuffle(dirs.begin(), dirs.end(), rng);
@@ -859,7 +976,7 @@ void GenerateTerrain(uint32_t seed) {
             if (overlap) {
                 continue;
             }
-            g_ramps.push_back(RampTile{ramp_center, ramp_half, dir, 0.0f, height});
+            g_ramps.push_back(RampTile{ramp_center, ramp_half, dir, 0.0f, height, i, true});
         }
     }
 
@@ -930,6 +1047,38 @@ Mesh CreateMesh(const std::vector<float>& vertices) {
     mesh.count = static_cast<GLsizei>(vertices.size() / 3);
     return mesh;
 }
+
+Mesh CreateLitMesh(const std::vector<glm::vec3>& positions,
+                   const std::vector<glm::vec3>& normals) {
+    Mesh mesh;
+    if (positions.size() != normals.size()) {
+        return mesh;
+    }
+    std::vector<float> data;
+    data.reserve(positions.size() * 6);
+    for (size_t i = 0; i < positions.size(); ++i) {
+        data.push_back(positions[i].x);
+        data.push_back(positions[i].y);
+        data.push_back(positions[i].z);
+        data.push_back(normals[i].x);
+        data.push_back(normals[i].y);
+        data.push_back(normals[i].z);
+    }
+    glGenVertexArrays(1, &mesh.vao);
+    glGenBuffers(1, &mesh.vbo);
+    glBindVertexArray(mesh.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+    glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                          reinterpret_cast<void*>(3 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    mesh.count = static_cast<GLsizei>(positions.size());
+    return mesh;
+}
 }  // namespace
 
 int main() {
@@ -989,6 +1138,7 @@ int main() {
         "#version 330 core\n"
         "layout (location = 0) in vec3 aPos;\n"
         "layout (location = 1) in vec3 aColor;\n"
+        "layout (location = 2) in vec3 aNormal;\n"
         "out vec3 vColor;\n"
         "out vec3 vNormal;\n"
         "uniform mat4 uMVP;\n"
@@ -996,9 +1146,10 @@ int main() {
         "uniform vec3 uColor;\n"
         "uniform int uOutlinePass;\n"
         "uniform float uOutlineSize;\n"
+        "uniform int uUseNormals;\n"
         "void main() {\n"
         "    vColor = (uUseVertexColor == 1) ? aColor : uColor;\n"
-        "    vNormal = normalize(aPos);\n"
+        "    vNormal = (uUseNormals == 1) ? aNormal : normalize(aPos);\n"
         "    vec3 pos = aPos;\n"
         "    if (uOutlinePass == 1) {\n"
         "        pos += vNormal * uOutlineSize;\n"
@@ -1272,6 +1423,9 @@ int main() {
                 glm::vec2 p(x + step * 0.5f, z + step * 0.5f);
                 bool skip = false;
                 for (const Plateau& plateau : g_plateaus) {
+                    if (!plateau.active) {
+                        continue;
+                    }
                     if (PointInRect(p, plateau.center, plateau.half)) {
                         skip = true;
                         break;
@@ -1279,6 +1433,9 @@ int main() {
                 }
                 if (!skip) {
                     for (const RampTile& ramp : g_ramps) {
+                        if (!ramp.active) {
+                            continue;
+                        }
                         if (PointInRect(p, ramp.center, ramp.half)) {
                             skip = true;
                             break;
@@ -1296,16 +1453,32 @@ int main() {
             }
         }
 
-        for (const Plateau& plateau : g_plateaus) {
+        auto plateau_fall_offset = [&](int plateau_index) {
+            if (plateau_index >= 0 &&
+                plateau_index < static_cast<int>(g_plateau_fall_offsets.size())) {
+                return g_plateau_fall_offsets[plateau_index];
+            }
+            return 0.0f;
+        };
+
+        for (int i = 0; i < static_cast<int>(g_plateaus.size()); ++i) {
+            const Plateau& plateau = g_plateaus[i];
+            if (!plateau.active) {
+                continue;
+            }
+            float plateau_y = plateau.height - plateau_fall_offset(i);
             glm::vec2 min = plateau.center - plateau.half;
             glm::vec2 max = plateau.center + plateau.half;
-            add_quad(glm::vec3(min.x, plateau.height, min.y),
-                     glm::vec3(max.x, plateau.height, min.y),
-                     glm::vec3(max.x, plateau.height, max.y),
-                     glm::vec3(min.x, plateau.height, max.y));
+            add_quad(glm::vec3(min.x, plateau_y, min.y),
+                     glm::vec3(max.x, plateau_y, min.y),
+                     glm::vec3(max.x, plateau_y, max.y),
+                     glm::vec3(min.x, plateau_y, max.y));
         }
 
         for (const RampTile& ramp : g_ramps) {
+            if (!ramp.active) {
+                continue;
+            }
             glm::vec2 min = ramp.center - ramp.half;
             glm::vec2 max = ramp.center + ramp.half;
             glm::vec2 p00(min.x, min.y);
@@ -1410,6 +1583,9 @@ int main() {
             }
         };
         for (const RampTile& ramp : g_ramps) {
+            if (!ramp.active) {
+                continue;
+            }
             glm::vec2 min = ramp.center - ramp.half;
             glm::vec2 max = ramp.center + ramp.half;
             glm::vec2 p00(min.x, min.y);
@@ -1612,10 +1788,86 @@ int main() {
     Mesh tree_mesh = build_tree_mesh(false);
     Mesh tree_mesh_low = build_tree_mesh(true);
 
+    struct HouseVariantDef {
+        glm::vec3 base_half;
+        float roof_height;
+        float roof_overhang;
+        bool chimney;
+    };
+    const HouseVariantDef house_defs[] = {
+        {glm::vec3(0.65f, 0.40f, 0.55f), 0.35f, 0.08f, true},
+        {glm::vec3(0.75f, 0.45f, 0.45f), 0.30f, 0.06f, false},
+        {glm::vec3(0.55f, 0.38f, 0.65f), 0.42f, 0.10f, true},
+        {glm::vec3(0.85f, 0.48f, 0.55f), 0.28f, 0.05f, false},
+        {glm::vec3(0.60f, 0.42f, 0.50f), 0.50f, 0.10f, true}
+    };
+    constexpr int kHouseVariantCount = static_cast<int>(sizeof(house_defs) / sizeof(house_defs[0]));
+    std::array<Mesh, kHouseVariantCount> house_base_meshes;
+    std::array<Mesh, kHouseVariantCount> house_roof_meshes;
+    for (int i = 0; i < kHouseVariantCount; ++i) {
+        const HouseVariantDef& def = house_defs[i];
+        LitMeshBuilder base_builder;
+        LitMeshBuilder roof_builder;
+        glm::mat4 base = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, def.base_half.y, 0.0f));
+        AddLitBox(base_builder, def.base_half, base);
+        glm::mat4 roof = glm::translate(glm::mat4(1.0f),
+                                        glm::vec3(0.0f, def.base_half.y + def.roof_height * 0.5f, 0.0f));
+        AddLitRoof(roof_builder,
+                   def.base_half.x + def.roof_overhang,
+                   def.base_half.z + def.roof_overhang,
+                   def.roof_height,
+                   roof);
+        if (def.chimney) {
+            glm::mat4 chimney = glm::translate(glm::mat4(1.0f),
+                                               glm::vec3(def.base_half.x * 0.35f,
+                                                         def.base_half.y + def.roof_height * 0.8f,
+                                                         -def.base_half.z * 0.2f));
+            chimney = glm::scale(chimney, glm::vec3(0.18f, 0.35f, 0.18f));
+            AddLitBox(roof_builder, glm::vec3(0.5f), chimney);
+        }
+        house_base_meshes[i] = CreateLitMesh(base_builder.positions, base_builder.normals);
+        house_roof_meshes[i] = CreateLitMesh(roof_builder.positions, roof_builder.normals);
+    }
+
+    LitMeshBuilder town_builder;
+    glm::mat4 hall_base = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.55f, 0.0f));
+    AddLitBox(town_builder, glm::vec3(1.1f, 0.55f, 0.9f), hall_base);
+    glm::mat4 hall_roof = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 1.15f, 0.0f));
+    AddLitRoof(town_builder, 1.25f, 1.05f, 0.55f, hall_roof);
+    glm::mat4 hall_tower = glm::translate(glm::mat4(1.0f), glm::vec3(0.65f, 1.55f, 0.0f));
+    hall_tower = glm::scale(hall_tower, glm::vec3(0.35f, 1.2f, 0.35f));
+    AddLitBox(town_builder, glm::vec3(0.5f), hall_tower);
+    Mesh town_hall_mesh = CreateLitMesh(town_builder.positions, town_builder.normals);
+
+    LitMeshBuilder barracks_builder;
+    glm::mat4 barracks_base = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.4f, 0.0f));
+    AddLitBox(barracks_builder, glm::vec3(0.9f, 0.4f, 0.7f), barracks_base);
+    glm::mat4 barracks_roof = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.9f, 0.0f));
+    AddLitRoof(barracks_builder, 1.0f, 0.8f, 0.3f, barracks_roof);
+    Mesh barracks_mesh = CreateLitMesh(barracks_builder.positions, barracks_builder.normals);
+
+    LitMeshBuilder armory_builder;
+    glm::mat4 armory_base = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.45f, 0.0f));
+    AddLitBox(armory_builder, glm::vec3(0.85f, 0.45f, 0.65f), armory_base);
+    glm::mat4 armory_roof = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.95f, 0.0f));
+    AddLitRoof(armory_builder, 0.95f, 0.75f, 0.32f, armory_roof);
+    glm::mat4 forge = glm::translate(glm::mat4(1.0f), glm::vec3(-0.45f, 1.05f, 0.0f));
+    forge = glm::scale(forge, glm::vec3(0.22f, 0.45f, 0.22f));
+    AddLitBox(armory_builder, glm::vec3(0.5f), forge);
+    Mesh armory_mesh = CreateLitMesh(armory_builder.positions, armory_builder.normals);
+
+    LitMeshBuilder tower_builder;
+    glm::mat4 tower_base = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.75f, 0.0f));
+    AddLitBox(tower_builder, glm::vec3(0.45f, 0.75f, 0.45f), tower_base);
+    glm::mat4 tower_top = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 1.55f, 0.0f));
+    AddLitRoof(tower_builder, 0.6f, 0.6f, 0.4f, tower_top);
+    Mesh watchtower_mesh = CreateLitMesh(tower_builder.positions, tower_builder.normals);
+
     GLint mvp_location = glGetUniformLocation(program, "uMVP");
     GLint color_location = glGetUniformLocation(program, "uColor");
     GLint alpha_location = glGetUniformLocation(program, "uAlpha");
     GLint use_vertex_color_location = glGetUniformLocation(program, "uUseVertexColor");
+    GLint use_normals_location = glGetUniformLocation(program, "uUseNormals");
     GLint light_dir_location = glGetUniformLocation(program, "uLightDir");
     GLint ambient_location = glGetUniformLocation(program, "uAmbient");
     GLint bands_location = glGetUniformLocation(program, "uBands");
@@ -1648,6 +1900,16 @@ int main() {
     const glm::vec3 palette_rim(0.25f, 0.85f, 0.95f);
     const glm::vec3 palette_fog(0.04f, 0.05f, 0.08f);
     const glm::vec3 palette_light_dir = glm::normalize(glm::vec3(-0.3f, 0.9f, 0.2f));
+    const glm::vec3 house_base_palette[] = {
+        glm::vec3(0.55f, 0.40f, 0.28f),
+        glm::vec3(0.60f, 0.62f, 0.66f),
+        glm::vec3(0.45f, 0.50f, 0.56f)
+    };
+    const glm::vec3 house_roof_palette[] = {
+        glm::vec3(0.42f, 0.18f, 0.12f),
+        glm::vec3(0.35f, 0.38f, 0.42f),
+        glm::vec3(0.70f, 0.52f, 0.28f)
+    };
 
     struct Enemy {
         glm::vec3 position;
@@ -1672,12 +1934,21 @@ int main() {
         Enemy
     };
 
+    enum class BuildingType {
+        House,
+        TownHall,
+        Barracks,
+        Armory,
+        Watchtower
+    };
+
     struct Building {
         glm::vec2 center;
         float size = 1.0f;
         float height = 2.0f;
         float base_height = 0.0f;
         BuildingOwner owner = BuildingOwner::Neutral;
+        BuildingType type = BuildingType::House;
         bool spawner = false;
         int health = 10;
         int max_health = 10;
@@ -1686,12 +1957,55 @@ int main() {
         float spawn_timer = 0.0f;
         float alive_timer = 0.0f;
         bool destroyed = false;
+        int platform_index = -1;
+        int house_variant = 0;
+        int house_material = 0;
+        float house_rotation = 0.0f;
     };
 
     enum class UnitState {
         Home,
         Follow,
         Guard
+    };
+
+    enum class OrderType {
+        None,
+        CaptureHomes
+    };
+
+    enum class PlatformState {
+        Active,
+        Collapsing,
+        Landed,
+        ConvertedToTown
+    };
+
+    struct Platform {
+        float base_height = 0.0f;
+        float ground_height = 0.0f;
+        glm::vec2 center = glm::vec2(0.0f);
+        std::vector<int> home_indices;
+        PlatformState state = PlatformState::Active;
+        float collapse_timer = 0.0f;
+        float landed_timer = 0.0f;
+        float collapse_duration = 2.2f;
+        float fall_distance = 6.0f;
+        float fall_offset = 0.0f;
+        int plateau_index = -1;
+    };
+
+    struct Town {
+        glm::vec3 position = glm::vec3(0.0f);
+        int upgrade_level = 0;
+        float production_timer = 0.0f;
+        float barracks_timer = 0.0f;
+        float watchtower_timer = 0.0f;
+        int barracks_level = 0;
+        int armory_level = 0;
+        int watchtower_level = 0;
+        bool ui_open = false;
+        int platform_index = -1;
     };
 
     struct Ally {
@@ -1702,6 +2016,10 @@ int main() {
         int home_index = -1;
         int guard_index = -1;
         UnitState state = UnitState::Home;
+        OrderType order = OrderType::None;
+        int order_target_home = -1;
+        int order_platform_index = -1;
+        bool gold = false;
         float attack_timer = 0.0f;
         float hurt_timer = 0.0f;
         float respawn_timer = 0.0f;
@@ -1862,6 +2180,7 @@ struct Obstacle {
     const float win_time = 300.0f;
     int enemies_killed = 0;
     int coins_earned = 0;
+    int points = 0;
 
     glm::vec3 player_position(0.0f, 0.0f, 0.0f);
     glm::vec3 player_velocity(0.0f, 0.0f, 0.0f);
@@ -1878,6 +2197,12 @@ struct Obstacle {
     float camera_distance = 9.0f;
     float camera_height = 0.0f;
     bool camera_height_initialized = false;
+    bool camera_look_active = false;
+    int selected_ally_id = -1;
+    bool house_wireframe_debug = false;
+    bool spawn_debug = false;
+    glm::vec3 last_spawn_debug_pos(0.0f);
+    int last_spawn_debug_platform = -1;
     uint32_t terrain_seed = 1337;
     bool terrain_dirty = true;
     const float play_area_extent = 90.0f;
@@ -1898,7 +2223,9 @@ struct Obstacle {
     std::vector<GroundEffect> ground_effects;
     std::vector<Pickup> pickups;
     std::vector<Building> buildings;
+    std::vector<Platform> platforms;
     std::vector<Ally> allies;
+    std::vector<Town> towns;
     std::vector<Obstacle> obstacles;
     int ally_id_counter = 0;
     float spawn_timer = 0.0f;
@@ -1971,6 +2298,11 @@ struct Obstacle {
     const float wall_thickness = 0.3f;
     auto rebuild_buildings = [&]() {
         buildings.clear();
+        platforms.clear();
+        towns.clear();
+        if (g_plateau_fall_offsets.size() != g_plateaus.size()) {
+            g_plateau_fall_offsets.assign(g_plateaus.size(), 0.0f);
+        }
         for (int x = -city_half; x <= city_half; ++x) {
             for (int z = -city_half; z <= city_half; ++z) {
                 if ((x + z) % 2 != 0) {
@@ -1991,11 +2323,52 @@ struct Obstacle {
                 building.height = height;
                 building.base_height = PlateauHeightAt(center);
                 building.owner = BuildingOwner::Neutral;
+                building.type = BuildingType::House;
                 building.spawner = false;
                 building.max_health = 10;
                 building.health = building.max_health;
+                uint32_t house_seed = terrain_seed;
+                house_seed ^= static_cast<uint32_t>(x * 73856093);
+                house_seed ^= static_cast<uint32_t>(z * 19349663);
+                std::mt19937 house_rng(house_seed);
+                std::uniform_int_distribution<int> variant_dist(0, kHouseVariantCount - 1);
+                std::uniform_int_distribution<int> material_dist(0,
+                    static_cast<int>(sizeof(house_base_palette) / sizeof(house_base_palette[0])) - 1);
+                std::uniform_int_distribution<int> rot_dist(0, 3);
+                building.house_variant = variant_dist(house_rng);
+                building.house_material = material_dist(house_rng);
+                building.house_rotation = static_cast<float>(rot_dist(house_rng)) * glm::half_pi<float>();
                 buildings.push_back(building);
             }
+        }
+
+        std::vector<int> platform_index_by_plateau(g_plateaus.size(), -1);
+        for (int i = 0; i < static_cast<int>(buildings.size()); ++i) {
+            Building& building = buildings[i];
+            int plateau_index = -1;
+            for (int p = 0; p < static_cast<int>(g_plateaus.size()); ++p) {
+                if (PointInRect(building.center, g_plateaus[p].center, g_plateaus[p].half)) {
+                    plateau_index = p;
+                    break;
+                }
+            }
+            if (plateau_index < 0) {
+                continue;
+            }
+            int platform_index = platform_index_by_plateau[plateau_index];
+            if (platform_index == -1) {
+                Platform platform;
+                platform.base_height = g_plateaus[plateau_index].height;
+                platform.center = g_plateaus[plateau_index].center;
+                platform.plateau_index = plateau_index;
+                platform.ground_height = BaseNoiseHeight(platform.center.x, platform.center.y);
+                platform.fall_distance = glm::max(0.0f, platform.base_height - platform.ground_height);
+                platforms.push_back(platform);
+                platform_index = static_cast<int>(platforms.size()) - 1;
+                platform_index_by_plateau[plateau_index] = platform_index;
+            }
+            platforms[platform_index].home_indices.push_back(i);
+            building.platform_index = platform_index;
         }
     };
     auto rebuild_obstacles = [&]() {
@@ -2011,6 +2384,9 @@ struct Obstacle {
             obstacles.push_back(box);
         }
         for (const RampTile& ramp : g_ramps) {
+            if (!ramp.active) {
+                continue;
+            }
             glm::vec2 min = ramp.center - ramp.half;
             glm::vec2 max = ramp.center + ramp.half;
             if (ramp.dir == 1 || ramp.dir == 2) {
@@ -2051,6 +2427,7 @@ struct Obstacle {
 
     terrain_seed = static_cast<uint32_t>(rng());
     GenerateTerrain(terrain_seed);
+    g_plateau_fall_offsets.assign(g_plateaus.size(), 0.0f);
     rebuild_ground();
     rebuild_ramp_walls();
     rebuild_buildings();
@@ -2263,11 +2640,65 @@ struct Obstacle {
         }
     };
 
+    auto get_platform_bounds = [&](int platform_index, glm::vec2& center, glm::vec2& half) {
+        if (platform_index < 0 || platform_index >= static_cast<int>(platforms.size())) {
+            return false;
+        }
+        int plateau_index = platforms[platform_index].plateau_index;
+        if (plateau_index < 0 || plateau_index >= static_cast<int>(g_plateaus.size())) {
+            return false;
+        }
+        center = g_plateaus[plateau_index].center;
+        half = g_plateaus[plateau_index].half;
+        return true;
+    };
+
+    auto clamp_to_platform = [&](int platform_index, const glm::vec2& p, float margin) {
+        glm::vec2 center(0.0f);
+        glm::vec2 half(0.0f);
+        if (!get_platform_bounds(platform_index, center, half)) {
+            return p;
+        }
+        glm::vec2 min = center - half + glm::vec2(margin);
+        glm::vec2 max = center + half - glm::vec2(margin);
+        glm::vec2 clamped = glm::clamp(p, min, max);
+        return clamped;
+    };
+
+    auto pick_spawn_outside_building = [&](const Building& building, int platform_index) {
+        float margin = 0.35f;
+        float radius = building.size * 0.65f + margin;
+        std::array<glm::vec2, 8> offsets = {
+            glm::vec2(radius, 0.0f),
+            glm::vec2(-radius, 0.0f),
+            glm::vec2(0.0f, radius),
+            glm::vec2(0.0f, -radius),
+            glm::vec2(radius * 0.7f, radius * 0.7f),
+            glm::vec2(-radius * 0.7f, radius * 0.7f),
+            glm::vec2(radius * 0.7f, -radius * 0.7f),
+            glm::vec2(-radius * 0.7f, -radius * 0.7f)
+        };
+        std::shuffle(offsets.begin(), offsets.end(), rng);
+        glm::vec2 center = building.center;
+        glm::vec2 half(building.size * 0.5f, building.size * 0.5f);
+        for (const glm::vec2& offset : offsets) {
+            glm::vec2 candidate = center + offset;
+            candidate = clamp_to_platform(platform_index, candidate, margin);
+            if (!PointInRect(candidate, center, half)) {
+                return candidate;
+            }
+        }
+        glm::vec2 fallback = clamp_to_platform(platform_index, center + glm::vec2(radius, 0.0f), margin);
+        return fallback;
+    };
+
     auto ally_spawn_position = [&](const Building& building) {
-        float angle = unit_dist(rng) * glm::two_pi<float>();
-        float radius = building.size * 0.75f;
-        glm::vec2 pos = building.center + glm::vec2(std::cos(angle), std::sin(angle)) * radius;
+        glm::vec2 pos = pick_spawn_outside_building(building, building.platform_index);
         float y = TerrainHeightAt(pos.x, pos.y, building.base_height);
+        if (spawn_debug) {
+            last_spawn_debug_pos = glm::vec3(pos.x, y + 0.1f, pos.y);
+            last_spawn_debug_platform = building.platform_index;
+        }
         return glm::vec3(pos.x, y + 0.6f, pos.y);
     };
 
@@ -2308,7 +2739,102 @@ struct Obstacle {
             }
             ally.state = state;
             ally.guard_index = guard_index;
+            ally.order = OrderType::None;
+            ally.order_target_home = -1;
+            ally.order_platform_index = -1;
         }
+    };
+
+    auto find_platform_index_for_position = [&](const glm::vec3& pos) {
+        for (int p = 0; p < static_cast<int>(g_plateaus.size()); ++p) {
+            if (PointInRect(glm::vec2(pos.x, pos.z), g_plateaus[p].center, g_plateaus[p].half)) {
+                for (int i = 0; i < static_cast<int>(platforms.size()); ++i) {
+                    if (platforms[i].plateau_index == p) {
+                        return i;
+                    }
+                }
+            }
+        }
+        return -1;
+    };
+
+    auto find_nearest_uncaptured_home = [&](int platform_index, const glm::vec3& pos) {
+        if (platform_index < 0 || platform_index >= static_cast<int>(platforms.size())) {
+            return -1;
+        }
+        const Platform& platform = platforms[platform_index];
+        if (platform.state != PlatformState::Active) {
+            return -1;
+        }
+        float best_dist = std::numeric_limits<float>::max();
+        int best_index = -1;
+        for (int index : platform.home_indices) {
+            const Building& building = buildings[index];
+            if (building.owner == BuildingOwner::Player) {
+                continue;
+            }
+            glm::vec2 delta = building.center - glm::vec2(pos.x, pos.z);
+            float dist = glm::dot(delta, delta);
+            if (dist < best_dist) {
+                best_dist = dist;
+                best_index = index;
+            }
+        }
+        return best_index;
+    };
+
+    auto spawn_town_for_platform = [&](int platform_index) {
+        if (platform_index < 0 || platform_index >= static_cast<int>(platforms.size())) {
+            return;
+        }
+        for (const Town& town : towns) {
+            if (town.platform_index == platform_index) {
+                return;
+            }
+        }
+        const Platform& platform = platforms[platform_index];
+        int hall_index = -1;
+        float best_dist = std::numeric_limits<float>::max();
+        for (int index : platform.home_indices) {
+            const Building& building = buildings[index];
+            glm::vec2 delta = building.center - platform.center;
+            float dist = glm::dot(delta, delta);
+            if (dist < best_dist) {
+                best_dist = dist;
+                hall_index = index;
+            }
+        }
+        if (hall_index >= 0) {
+            buildings[hall_index].type = BuildingType::TownHall;
+            std::vector<int> remaining;
+            remaining.reserve(platform.home_indices.size());
+            for (int index : platform.home_indices) {
+                if (index != hall_index) {
+                    remaining.push_back(index);
+                }
+            }
+            std::sort(remaining.begin(), remaining.end(), [&](int a, int b) {
+                glm::vec2 da = buildings[a].center - buildings[hall_index].center;
+                glm::vec2 db = buildings[b].center - buildings[hall_index].center;
+                return glm::dot(da, da) < glm::dot(db, db);
+            });
+            if (!remaining.empty()) {
+                buildings[remaining[0]].type = BuildingType::Barracks;
+            }
+            if (remaining.size() > 1) {
+                buildings[remaining[1]].type = BuildingType::Armory;
+            }
+            if (remaining.size() > 2) {
+                buildings[remaining[2]].type = BuildingType::Watchtower;
+            }
+        }
+        Town town;
+        glm::vec3 hall_pos = hall_index >= 0
+            ? glm::vec3(buildings[hall_index].center.x, platform.ground_height + 0.35f, buildings[hall_index].center.y)
+            : glm::vec3(platform.center.x, platform.ground_height + 0.35f, platform.center.y);
+        town.position = hall_pos;
+        town.platform_index = platform_index;
+        towns.push_back(town);
     };
 
     auto save_progress = [&]() {
@@ -2430,6 +2956,7 @@ struct Obstacle {
         run_time = 0.0f;
         enemies_killed = 0;
         coins_earned = 0;
+        points = 0;
         victory = false;
         freeze_timer = 0.0f;
         enemy_spawner_timer = 0.0f;
@@ -2582,11 +3109,76 @@ struct Obstacle {
     Uint64 last_ticks = SDL_GetPerformanceCounter();
     bool running = true;
     while (running) {
-        SDL_SetRelativeMouseMode(state == GameState::Running ? SDL_TRUE : SDL_FALSE);
+        bool want_relative = state == GameState::Running && camera_look_active;
+        SDL_SetRelativeMouseMode(want_relative ? SDL_TRUE : SDL_FALSE);
+        SDL_ShowCursor(want_relative ? SDL_DISABLE : SDL_ENABLE);
         Uint64 current_ticks = SDL_GetPerformanceCounter();
         float delta_time = static_cast<float>(current_ticks - last_ticks) /
                            static_cast<float>(SDL_GetPerformanceFrequency());
         last_ticks = current_ticks;
+
+        auto project_to_screen = [&](const glm::vec3& world_pos, float& out_x, float& out_y) {
+            glm::mat4 projection = glm::perspective(
+                glm::radians(60.0f),
+                static_cast<float>(window_width) / static_cast<float>(window_height),
+                0.1f,
+                140.0f);
+            float jump_view_phase = jump_timer > 0.0f
+                ? (jump_duration - jump_timer) / jump_duration
+                : 0.0f;
+            float jump_view_offset = jump_timer > 0.0f
+                ? std::sin(jump_view_phase * glm::pi<float>()) * jump_height
+                : 0.0f;
+            glm::vec3 cam_dir(
+                std::cos(camera_pitch) * std::cos(camera_yaw),
+                std::sin(camera_pitch),
+                std::cos(camera_pitch) * std::sin(camera_yaw));
+            glm::vec3 camera_pos = player_position - cam_dir * camera_distance;
+            float min_cam_y = TerrainHeightAt(camera_pos.x, camera_pos.z, camera_pos.y) + 1.0f;
+            float target_cam_y = glm::max(camera_pos.y, min_cam_y);
+            camera_pos.y = camera_height_initialized ? camera_height : target_cam_y;
+            glm::mat4 view = glm::lookAt(
+                camera_pos,
+                player_position + glm::vec3(0.0f, jump_view_offset, 0.0f),
+                glm::vec3(0.0f, 1.0f, 0.0f));
+            glm::vec4 clip = projection * view * glm::vec4(world_pos, 1.0f);
+            if (clip.w <= 0.0f) {
+                return false;
+            }
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            if (ndc.x < -1.0f || ndc.x > 1.0f || ndc.y < -1.0f || ndc.y > 1.0f) {
+                return false;
+            }
+            out_x = (ndc.x * 0.5f + 0.5f) * window_width;
+            out_y = (ndc.y * 0.5f + 0.5f) * window_height;
+            return true;
+        };
+
+        auto pick_friendly_unit = [&](int mx, int my) {
+            const float pick_radius = 26.0f;
+            float best_dist2 = pick_radius * pick_radius;
+            int best_id = -1;
+            float mouse_x = static_cast<float>(mx);
+            float mouse_y = static_cast<float>(window_height - my);
+            for (const Ally& ally : allies) {
+                if (!ally.alive) {
+                    continue;
+                }
+                float sx = 0.0f;
+                float sy = 0.0f;
+                if (!project_to_screen(ally.position + glm::vec3(0.0f, 0.45f, 0.0f), sx, sy)) {
+                    continue;
+                }
+                float dx = sx - mouse_x;
+                float dy = sy - mouse_y;
+                float dist2 = dx * dx + dy * dy;
+                if (dist2 <= best_dist2) {
+                    best_dist2 = dist2;
+                    best_id = ally.id;
+                }
+            }
+            return best_id;
+        };
 
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -2775,6 +3367,90 @@ struct Obstacle {
                         if (guard_index >= 0) {
                             command_units(UnitState::Guard, guard_index);
                         }
+                    } else if (key == SDLK_F1) {
+                        house_wireframe_debug = !house_wireframe_debug;
+                    } else if (key == SDLK_F2) {
+                        spawn_debug = !spawn_debug;
+                    } else if (key == SDLK_c) {
+                        if (selected_ally_id != -1) {
+                            int platform_index = find_platform_index_for_position(player_position);
+                            for (Ally& ally : allies) {
+                                if (!ally.alive || ally.id != selected_ally_id) {
+                                    continue;
+                                }
+                                ally.order = OrderType::CaptureHomes;
+                                ally.order_platform_index = platform_index;
+                                ally.order_target_home = find_nearest_uncaptured_home(platform_index, ally.position);
+                                if (ally.order_target_home == -1 && platform_index == -1) {
+                                    float best_dist = 40.0f * 40.0f;
+                                    int best_index = -1;
+                                    for (int i = 0; i < static_cast<int>(buildings.size()); ++i) {
+                                        if (buildings[i].owner == BuildingOwner::Player) {
+                                            continue;
+                                        }
+                                        glm::vec2 delta = buildings[i].center - glm::vec2(ally.position.x, ally.position.z);
+                                        float dist = glm::dot(delta, delta);
+                                        if (dist < best_dist) {
+                                            best_dist = dist;
+                                            best_index = i;
+                                        }
+                                    }
+                                    if (best_index >= 0) {
+                                        ally.order_target_home = best_index;
+                                        ally.order_platform_index = buildings[best_index].platform_index;
+                                    }
+                                }
+                                if (ally.order_target_home == -1) {
+                                    ally.order = OrderType::None;
+                                    ally.order_platform_index = -1;
+                                }
+                                break;
+                            }
+                        }
+                    } else if (key == SDLK_t) {
+                        float best_dist = 2.8f * 2.8f;
+                        int best_index = -1;
+                        for (int i = 0; i < static_cast<int>(towns.size()); ++i) {
+                            glm::vec3 delta = towns[i].position - player_position;
+                            delta.y = 0.0f;
+                            float dist = glm::dot(delta, delta);
+                            if (dist < best_dist) {
+                                best_dist = dist;
+                                best_index = i;
+                            }
+                        }
+                        if (best_index >= 0) {
+                            bool next_state = !towns[best_index].ui_open;
+                            for (Town& town : towns) {
+                                town.ui_open = false;
+                            }
+                            towns[best_index].ui_open = next_state;
+                        }
+                    } else if (key == SDLK_1 || key == SDLK_2 || key == SDLK_3) {
+                        int open_town_index = -1;
+                        for (int i = 0; i < static_cast<int>(towns.size()); ++i) {
+                            if (towns[i].ui_open) {
+                                open_town_index = i;
+                                break;
+                            }
+                        }
+                        if (open_town_index >= 0) {
+                            Town& town = towns[open_town_index];
+                            int key_index = key == SDLK_1 ? 0 : (key == SDLK_2 ? 1 : 2);
+                            int barracks_cost = 6 + town.barracks_level * 6;
+                            int armory_cost = 8 + town.armory_level * 8;
+                            int watch_cost = 10 + town.watchtower_level * 10;
+                            if (key_index == 0 && points >= barracks_cost) {
+                                points -= barracks_cost;
+                                town.barracks_level += 1;
+                            } else if (key_index == 1 && points >= armory_cost) {
+                                points -= armory_cost;
+                                town.armory_level += 1;
+                            } else if (key_index == 2 && points >= watch_cost) {
+                                points -= watch_cost;
+                                town.watchtower_level += 1;
+                            }
+                        }
                     } else if (key == SDLK_ESCAPE) {
                         state = GameState::Paused;
                     }
@@ -2908,11 +3584,24 @@ struct Obstacle {
                         state = GameState::Running;
                     }
                 }
-            } else if (event.type == SDL_MOUSEMOTION && state == GameState::Running) {
-                const float sensitivity = 0.0018f;
-                camera_yaw += static_cast<float>(event.motion.xrel) * sensitivity;
-                camera_pitch -= static_cast<float>(event.motion.yrel) * sensitivity;
-                camera_pitch = glm::clamp(camera_pitch, glm::radians(-45.0f), glm::radians(10.0f));
+            } else if (event.type == SDL_MOUSEBUTTONDOWN) {
+                if (event.button.button == SDL_BUTTON_RIGHT && state == GameState::Running) {
+                    camera_look_active = true;
+                } else if (event.button.button == SDL_BUTTON_LEFT &&
+                           state == GameState::Running && !camera_look_active) {
+                    selected_ally_id = pick_friendly_unit(event.button.x, event.button.y);
+                }
+            } else if (event.type == SDL_MOUSEBUTTONUP) {
+                if (event.button.button == SDL_BUTTON_RIGHT) {
+                    camera_look_active = false;
+                }
+            } else if (event.type == SDL_MOUSEMOTION) {
+                if (state == GameState::Running && camera_look_active) {
+                    const float sensitivity = 0.0018f;
+                    camera_yaw += static_cast<float>(event.motion.xrel) * sensitivity;
+                    camera_pitch -= static_cast<float>(event.motion.yrel) * sensitivity;
+                    camera_pitch = glm::clamp(camera_pitch, glm::radians(-45.0f), glm::radians(10.0f));
+                }
             } else if (event.type == SDL_MOUSEWHEEL && state == GameState::Running) {
                 camera_distance -= static_cast<float>(event.wheel.y) * 0.6f;
                 camera_distance = glm::clamp(camera_distance, 4.0f, 16.0f);
@@ -2920,6 +3609,7 @@ struct Obstacle {
         }
 
         if (state != GameState::Running) {
+            camera_look_active = false;
             player_move_amount = 0.0f;
         }
 
@@ -3122,19 +3812,41 @@ struct Obstacle {
                 }
             }
 
-            if (garlic_level > 0) {
+            {
+                float capture_radius = glm::max(attack_radius, 2.2f);
+                float capture_radius_sq = capture_radius * capture_radius;
                 for (Building& building : buildings) {
                     if (building.owner == BuildingOwner::Player) {
                         continue;
                     }
-                    if (std::abs(player_position.y - building.base_height) > 2.0f) {
-                        building.capture_timer = glm::max(0.0f, building.capture_timer - delta_time * 1.5f);
+                    if (building.platform_index < 0 ||
+                        building.platform_index >= static_cast<int>(platforms.size()) ||
+                        platforms[building.platform_index].state != PlatformState::Active) {
                         continue;
                     }
-                    glm::vec2 delta = building.center - glm::vec2(player_position.x, player_position.z);
-                    float dist_sq = glm::dot(delta, delta);
-                    if (dist_sq <= attack_radius * attack_radius) {
-                        building.capture_timer += delta_time;
+                    int contributors = 0;
+                    if (std::abs(player_position.y - building.base_height) <= 2.0f) {
+                        glm::vec2 delta = building.center - glm::vec2(player_position.x, player_position.z);
+                        float dist_sq = glm::dot(delta, delta);
+                        if (dist_sq <= capture_radius_sq) {
+                            contributors += 1;
+                        }
+                    }
+                    for (const Ally& ally : allies) {
+                        if (!ally.alive) {
+                            continue;
+                        }
+                        if (std::abs(ally.position.y - building.base_height) > 2.0f) {
+                            continue;
+                        }
+                        glm::vec2 delta = building.center - glm::vec2(ally.position.x, ally.position.z);
+                        float dist_sq = glm::dot(delta, delta);
+                        if (dist_sq <= capture_radius_sq) {
+                            contributors += 1;
+                        }
+                    }
+                    if (contributors > 0) {
+                        building.capture_timer += delta_time * static_cast<float>(contributors);
                     } else {
                         building.capture_timer = glm::max(0.0f, building.capture_timer - delta_time * 1.5f);
                     }
@@ -3149,6 +3861,178 @@ struct Obstacle {
                         capture_waves.push_back(
                             CaptureWave{glm::vec3(building.center.x, building.base_height + 0.05f, building.center.y), 0.0f, 0.8f});
                         rebuild_obstacles();
+                    }
+                }
+            }
+
+            for (Platform& platform : platforms) {
+                if (platform.state != PlatformState::Active) {
+                    continue;
+                }
+                if (platform.home_indices.empty()) {
+                    continue;
+                }
+                bool all_captured = true;
+                for (int index : platform.home_indices) {
+                    if (buildings[index].owner != BuildingOwner::Player) {
+                        all_captured = false;
+                        break;
+                    }
+                }
+            if (all_captured) {
+                platform.state = PlatformState::Collapsing;
+                platform.collapse_timer = 0.0f;
+                platform.landed_timer = 0.0f;
+                platform.fall_offset = 0.0f;
+            }
+        }
+
+            for (int p = 0; p < static_cast<int>(platforms.size()); ++p) {
+                Platform& platform = platforms[p];
+                if (platform.state == PlatformState::Collapsing) {
+                    platform.collapse_timer += delta_time;
+                    float t = glm::clamp(platform.collapse_timer / platform.collapse_duration, 0.0f, 1.0f);
+                    float ease = t * t * (3.0f - 2.0f * t);
+                    platform.fall_offset = platform.fall_distance * ease;
+                    if (platform.plateau_index >= 0 &&
+                        platform.plateau_index < static_cast<int>(g_plateau_fall_offsets.size())) {
+                        g_plateau_fall_offsets[platform.plateau_index] = platform.fall_offset;
+                    }
+                    if (platform.collapse_timer >= platform.collapse_duration) {
+                        platform.state = PlatformState::Landed;
+                        platform.landed_timer = 0.0f;
+                        platform.fall_offset = platform.fall_distance;
+                        if (platform.plateau_index >= 0 &&
+                            platform.plateau_index < static_cast<int>(g_plateau_fall_offsets.size())) {
+                            g_plateau_fall_offsets[platform.plateau_index] = platform.fall_offset;
+                        }
+                        if (platform.plateau_index >= 0 &&
+                            platform.plateau_index < static_cast<int>(g_plateaus.size())) {
+                            g_plateaus[platform.plateau_index].active = false;
+                            for (RampTile& ramp : g_ramps) {
+                                if (ramp.plateau_index == platform.plateau_index) {
+                                    ramp.active = false;
+                                }
+                            }
+                            rebuild_ground();
+                            rebuild_ramp_walls();
+                            rebuild_obstacles();
+                        }
+                    }
+                } else if (platform.state == PlatformState::Landed) {
+                    platform.landed_timer += delta_time;
+                    if (platform.landed_timer >= 0.35f) {
+                        spawn_town_for_platform(p);
+                        platform.state = PlatformState::ConvertedToTown;
+                    }
+                }
+            }
+
+            for (Town& town : towns) {
+                town.production_timer += delta_time;
+            }
+
+            int total_armory_level = 0;
+            for (const Town& town : towns) {
+                total_armory_level += town.armory_level;
+            }
+            int ally_damage_bonus = total_armory_level;
+            int ally_health_bonus = total_armory_level;
+            for (Town& town : towns) {
+                if (town.barracks_level > 0) {
+                    town.barracks_timer += delta_time;
+                    float interval = glm::max(4.0f, 12.0f - 2.0f * static_cast<float>(town.barracks_level - 1));
+                    if (town.barracks_timer >= interval) {
+                        town.barracks_timer = 0.0f;
+                        Ally ally;
+                        glm::vec2 spawn_center(town.position.x, town.position.z);
+                        float spawn_y = town.position.y;
+                        const Building* barracks_building = nullptr;
+                        if (town.platform_index >= 0 &&
+                            town.platform_index < static_cast<int>(platforms.size())) {
+                            const Platform& platform = platforms[town.platform_index];
+                            spawn_y = platform.state == PlatformState::ConvertedToTown
+                                ? platform.ground_height
+                                : platform.base_height - platform.fall_offset;
+                            for (int index : platform.home_indices) {
+                                if (buildings[index].type == BuildingType::Barracks) {
+                                    spawn_center = buildings[index].center;
+                                    barracks_building = &buildings[index];
+                                    break;
+                                }
+                            }
+                        }
+                        glm::vec2 pos2d = spawn_center;
+                        if (barracks_building) {
+                            pos2d = pick_spawn_outside_building(*barracks_building, barracks_building->platform_index);
+                        }
+                        glm::vec3 spawn_pos(pos2d.x, spawn_y, pos2d.y);
+                        spawn_pos.y = TerrainHeightAt(spawn_pos.x, spawn_pos.z, spawn_pos.y);
+                        if (spawn_debug) {
+                            last_spawn_debug_pos = glm::vec3(spawn_pos.x, spawn_pos.y + 0.1f, spawn_pos.z);
+                            last_spawn_debug_platform = town.platform_index;
+                        }
+                        ally.position = spawn_pos;
+                        ally.id = ally_id_counter++;
+                        ally.home_index = -1;
+                        ally.guard_index = -1;
+                        ally.state = UnitState::Follow;
+                        ally.order = OrderType::None;
+                        ally.order_target_home = -1;
+                        ally.order_platform_index = -1;
+                        ally.max_health = 4 + ally_health_bonus;
+                        ally.health = ally.max_health;
+                        ally.gold = true;
+                        allies.push_back(ally);
+                    }
+                }
+                if (town.watchtower_level > 0) {
+                    town.watchtower_timer += delta_time;
+                    float interval = 1.1f / (1.0f + 0.35f * static_cast<float>(town.watchtower_level));
+                    if (town.watchtower_timer >= interval) {
+                        town.watchtower_timer = 0.0f;
+                        float radius = 5.0f + 1.5f * static_cast<float>(town.watchtower_level);
+                        float radius_sq = radius * radius;
+                        int damage = 1 + town.watchtower_level;
+                        glm::vec3 tower_pos = town.position;
+                        if (town.platform_index >= 0 &&
+                            town.platform_index < static_cast<int>(platforms.size())) {
+                            const Platform& platform = platforms[town.platform_index];
+                            for (int index : platform.home_indices) {
+                                if (buildings[index].type == BuildingType::Watchtower) {
+                                    float base_y = platform.state == PlatformState::ConvertedToTown
+                                        ? platform.ground_height
+                                        : platform.base_height - platform.fall_offset;
+                                    tower_pos = glm::vec3(buildings[index].center.x, base_y, buildings[index].center.y);
+                                    break;
+                                }
+                            }
+                        }
+                        Enemy* best_enemy = nullptr;
+                        float best_dist = std::numeric_limits<float>::max();
+                        for (Enemy& enemy : enemies) {
+                            glm::vec3 delta = enemy.position - tower_pos;
+                            delta.y = 0.0f;
+                            float dist = glm::dot(delta, delta);
+                            if (dist <= radius_sq && dist < best_dist) {
+                                best_dist = dist;
+                                best_enemy = &enemy;
+                            }
+                        }
+                        if (best_enemy) {
+                            glm::vec3 launch_pos = tower_pos + glm::vec3(0.0f, 1.6f, 0.0f);
+                            glm::vec3 to_target = best_enemy->position + glm::vec3(0.0f, 0.3f, 0.0f) - launch_pos;
+                            if (glm::length(to_target) < 0.001f) {
+                                to_target = glm::vec3(0.0f, 0.0f, -1.0f);
+                            }
+                            glm::vec3 dir = glm::normalize(to_target);
+                            projectiles.push_back(Projectile{
+                                launch_pos,
+                                dir * 10.0f,
+                                2.2f,
+                                damage,
+                                glm::vec3(0.90f, 0.75f, 0.35f)});
+                        }
                     }
                 }
             }
@@ -3176,6 +4060,11 @@ struct Obstacle {
                     ally.home_index >= 0 &&
                     ally.home_index < static_cast<int>(buildings.size())) {
                     Building& home = buildings[ally.home_index];
+                    if (home.platform_index < 0 ||
+                        home.platform_index >= static_cast<int>(platforms.size()) ||
+                        platforms[home.platform_index].state != PlatformState::Active) {
+                        continue;
+                    }
                     int max_units = home.veteran_timer >= 60.0f ? 2 : 1;
                     if (home.owner == BuildingOwner::Player &&
                         alive_counts[ally.home_index] < max_units) {
@@ -3192,6 +4081,11 @@ struct Obstacle {
             for (int i = 0; i < static_cast<int>(buildings.size()); ++i) {
                 Building& building = buildings[i];
                 if (building.owner != BuildingOwner::Player) {
+                    continue;
+                }
+                if (building.platform_index < 0 ||
+                    building.platform_index >= static_cast<int>(platforms.size()) ||
+                    platforms[building.platform_index].state != PlatformState::Active) {
                     continue;
                 }
                 int max_units = building.veteran_timer >= 60.0f ? 2 : 1;
@@ -3355,33 +4249,61 @@ struct Obstacle {
                 glm::vec3 target = ally.position;
                 float follow_jump_bonus = 0.0f;
                 bool ally_jump_active = false;
-                if (ally.state == UnitState::Follow) {
-                    glm::vec2 offset = ally_ring_offset(ally.id, attack_radius * 0.75f);
-                    target = player_position + glm::vec3(offset.x, 0.0f, offset.y);
-                    follow_jump_bonus = jump_timer > 0.0f ? 1.0f : 0.0f;
-                    ally_jump_active = (jump_timer > 0.0f || jump_release_timer > 0.0f);
-                } else if (ally.state == UnitState::Guard) {
-                    if (ally.guard_index >= 0 &&
-                        ally.guard_index < static_cast<int>(buildings.size()) &&
-                        buildings[ally.guard_index].owner == BuildingOwner::Player) {
-                        glm::vec2 offset = ally_ring_offset(ally.id, buildings[ally.guard_index].size * 0.65f);
-                        target = glm::vec3(buildings[ally.guard_index].center.x + offset.x,
-                                           ally.position.y,
-                                           buildings[ally.guard_index].center.y + offset.y);
+                bool using_capture_order = false;
+                if (ally.order == OrderType::CaptureHomes) {
+                    if (ally.order_platform_index < 0 ||
+                        ally.order_platform_index >= static_cast<int>(platforms.size()) ||
+                        platforms[ally.order_platform_index].state != PlatformState::Active) {
+                        ally.order = OrderType::None;
+                        ally.order_target_home = -1;
+                        ally.order_platform_index = -1;
+                    } else {
+                        if (ally.order_target_home < 0 ||
+                            ally.order_target_home >= static_cast<int>(buildings.size()) ||
+                            buildings[ally.order_target_home].owner == BuildingOwner::Player ||
+                            buildings[ally.order_target_home].platform_index != ally.order_platform_index) {
+                            ally.order_target_home =
+                                find_nearest_uncaptured_home(ally.order_platform_index, ally.position);
+                        }
+                        if (ally.order_target_home >= 0) {
+                            const Building& home = buildings[ally.order_target_home];
+                            target = glm::vec3(home.center.x, ally.position.y, home.center.y);
+                            using_capture_order = true;
+                        } else {
+                            ally.order = OrderType::None;
+                            ally.order_platform_index = -1;
+                        }
+                    }
+                }
+                if (!using_capture_order) {
+                    if (ally.state == UnitState::Follow) {
+                        glm::vec2 offset = ally_ring_offset(ally.id, attack_radius * 0.75f);
+                        target = player_position + glm::vec3(offset.x, 0.0f, offset.y);
+                        follow_jump_bonus = jump_timer > 0.0f ? 1.0f : 0.0f;
+                        ally_jump_active = (jump_timer > 0.0f || jump_release_timer > 0.0f);
+                    } else if (ally.state == UnitState::Guard) {
+                        if (ally.guard_index >= 0 &&
+                            ally.guard_index < static_cast<int>(buildings.size()) &&
+                            buildings[ally.guard_index].owner == BuildingOwner::Player) {
+                            glm::vec2 offset = ally_ring_offset(ally.id, buildings[ally.guard_index].size * 0.65f);
+                            target = glm::vec3(buildings[ally.guard_index].center.x + offset.x,
+                                               ally.position.y,
+                                               buildings[ally.guard_index].center.y + offset.y);
+                        } else if (ally.home_index >= 0 &&
+                                   ally.home_index < static_cast<int>(buildings.size())) {
+                            glm::vec2 offset = ally_ring_offset(ally.id, buildings[ally.home_index].size * 0.65f);
+                            target = glm::vec3(buildings[ally.home_index].center.x + offset.x,
+                                               ally.position.y,
+                                               buildings[ally.home_index].center.y + offset.y);
+                            ally.state = UnitState::Home;
+                        }
                     } else if (ally.home_index >= 0 &&
                                ally.home_index < static_cast<int>(buildings.size())) {
                         glm::vec2 offset = ally_ring_offset(ally.id, buildings[ally.home_index].size * 0.65f);
                         target = glm::vec3(buildings[ally.home_index].center.x + offset.x,
                                            ally.position.y,
                                            buildings[ally.home_index].center.y + offset.y);
-                        ally.state = UnitState::Home;
                     }
-                } else if (ally.home_index >= 0 &&
-                           ally.home_index < static_cast<int>(buildings.size())) {
-                    glm::vec2 offset = ally_ring_offset(ally.id, buildings[ally.home_index].size * 0.65f);
-                    target = glm::vec3(buildings[ally.home_index].center.x + offset.x,
-                                       ally.position.y,
-                                       buildings[ally.home_index].center.y + offset.y);
                 }
 
                 bool militia = false;
@@ -3397,7 +4319,13 @@ struct Obstacle {
                 }
 
                 float ally_speed = militia ? 3.6f : 3.0f;
-                int ally_damage = militia ? 3 : 2;
+                int ally_damage = (militia ? 3 : 2) + ally_damage_bonus;
+                int desired_max_health = 4 + ally_health_bonus;
+                if (ally.max_health < desired_max_health) {
+                    int delta = desired_max_health - ally.max_health;
+                    ally.max_health = desired_max_health;
+                    ally.health += delta;
+                }
                 glm::vec3 to_target = target - ally.position;
                 to_target.y = 0.0f;
                 float dist = glm::length(to_target);
@@ -3427,12 +4355,12 @@ struct Obstacle {
                         ally.position.x = desired.x;
                         ally.position.z = desired.z;
                     }
-                    float target_y = TerrainHeightAt(ally.position.x, ally.position.z, ally.position.y);
-                    if (follow_jump_bonus > 0.0f) {
-                        target_y += 0.6f;
-                    }
-                    ally.position.y = glm::mix(ally.position.y, target_y, 0.35f);
                 }
+                float target_y = TerrainHeightAt(ally.position.x, ally.position.z, ally.position.y);
+                if (follow_jump_bonus > 0.0f) {
+                    target_y += 0.6f;
+                }
+                ally.position.y = glm::mix(ally.position.y, target_y, 0.35f);
 
                 if (ally.attack_timer > 0.0f) {
                     ally.attack_timer = glm::max(0.0f, ally.attack_timer - delta_time);
@@ -3464,6 +4392,18 @@ struct Obstacle {
                 if (ally.health <= 0) {
                     ally.alive = false;
                     ally.respawn_timer = 20.0f;
+                }
+            }
+            if (selected_ally_id != -1) {
+                bool selected_alive = false;
+                for (const Ally& ally : allies) {
+                    if (ally.alive && ally.id == selected_ally_id) {
+                        selected_alive = true;
+                        break;
+                    }
+                }
+                if (!selected_alive) {
+                    selected_ally_id = -1;
                 }
             }
 
@@ -3781,6 +4721,7 @@ struct Obstacle {
                     gems.push_back(ExperienceGem{enemies[i].position});
                     enemies_killed += 1;
                     coins_earned += enemies[i].elite ? 3 : 1;
+                    points += enemies[i].elite ? 2 : 1;
                     float drop_roll = unit_dist(rng);
                     if (drop_roll < 0.08f) {
                         pickups.push_back(Pickup{enemies[i].position, PickupType::Coin});
@@ -3804,6 +4745,8 @@ struct Obstacle {
                 if (dist <= pickup_magnet_radius && dist > 0.001f) {
                     gems[i].position -= (delta / dist) * (4.0f + pickup_magnet_radius) * delta_time;
                 }
+                float gem_ground = TerrainHeightAt(gems[i].position.x, gems[i].position.z, gems[i].position.y);
+                gems[i].position.y = glm::mix(gems[i].position.y, gem_ground + 0.15f, 0.25f);
                 if (dist <= 1.0f) {
                     player_xp += 1;
                     gems[i] = gems.back();
@@ -3819,6 +4762,8 @@ struct Obstacle {
                 if (dist <= pickup_magnet_radius && dist > 0.001f) {
                     pickups[i].position -= (delta / dist) * (3.5f + pickup_magnet_radius) * delta_time;
                 }
+                float pickup_ground = TerrainHeightAt(pickups[i].position.x, pickups[i].position.z, pickups[i].position.y);
+                pickups[i].position.y = glm::mix(pickups[i].position.y, pickup_ground + 0.1f, 0.25f);
                 if (dist <= 1.1f) {
                     switch (pickups[i].type) {
                         case PickupType::Coin:
@@ -3994,9 +4939,10 @@ struct Obstacle {
         glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        glUseProgram(program);
-        glUniform1i(use_vertex_color_location, 0);
-        glUniform3f(light_dir_location, palette_light_dir.x, palette_light_dir.y, palette_light_dir.z);
+    glUseProgram(program);
+    glUniform1i(use_vertex_color_location, 0);
+    glUniform1i(use_normals_location, 0);
+    glUniform3f(light_dir_location, palette_light_dir.x, palette_light_dir.y, palette_light_dir.z);
         glUniform1f(ambient_location, 0.35f);
         glUniform1i(bands_location, 3);
         glUniform3f(rim_color_location, palette_rim.x, palette_rim.y, palette_rim.z);
@@ -4123,59 +5069,217 @@ struct Obstacle {
             glBindVertexArray(0);
         }
 
-        // City blocks (wireframe skyline so enemies remain visible)
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        glLineWidth(1.5f);
+        // Houses (solid shaded)
+        glUseProgram(program);
+        glUniform1i(use_vertex_color_location, 0);
+        glUniform1i(use_normals_location, 1);
         for (const Building& building : buildings) {
-            glm::vec3 base(building.center.x,
-                           building.base_height + building.height * 0.5f,
-                           building.center.y);
-            glm::mat4 block = glm::translate(glm::mat4(1.0f), base);
-            block = glm::scale(block, glm::vec3(building.size, building.height, building.size));
-            glm::mat4 block_mvp = projection * view * block;
-            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(block_mvp));
-            glm::vec3 color(0.18f, 0.55f, 0.70f);
+            float base_y = building.base_height;
+            if (building.platform_index >= 0 &&
+                building.platform_index < static_cast<int>(platforms.size())) {
+                base_y -= platforms[building.platform_index].fall_offset;
+            }
+            glm::mat4 model = glm::translate(glm::mat4(1.0f),
+                                             glm::vec3(building.center.x, base_y, building.center.y));
+            model = glm::rotate(model, building.house_rotation, glm::vec3(0.0f, 1.0f, 0.0f));
+            float house_scale = building.size * 0.8f;
+            model = glm::scale(model, glm::vec3(house_scale, house_scale, house_scale));
+            glm::mat4 mvp = projection * view * model;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(mvp));
+
+            glm::vec3 base_color = house_base_palette[building.house_material];
+            glm::vec3 roof_color = house_roof_palette[building.house_material];
             if (building.owner == BuildingOwner::Enemy && building.spawner) {
                 float danger_pulse = 0.6f + 0.4f * std::sin(run_time * 4.0f + building.center.x * 0.12f);
                 glm::vec3 danger = building.alive_timer >= 120.0f
                     ? glm::vec3(1.0f, 0.65f, 0.10f)
                     : glm::vec3(1.0f, 0.15f, 0.20f);
-                color = glm::mix(color, danger, danger_pulse);
+                base_color = glm::mix(base_color, danger, danger_pulse * 0.55f);
+                roof_color = glm::mix(roof_color, danger, danger_pulse * 0.35f);
             } else if (building.owner == BuildingOwner::Player) {
-                if (building.veteran_timer >= 60.0f) {
-                    color = glm::mix(color, glm::vec3(0.75f, 0.35f, 0.95f), 0.65f);
-                } else {
-                    color = glm::mix(color, glm::vec3(0.25f, 0.95f, 0.45f), 0.6f);
-                }
+                glm::vec3 tint = building.veteran_timer >= 60.0f
+                    ? glm::vec3(0.70f, 0.35f, 0.95f)
+                    : glm::vec3(0.20f, 0.85f, 0.40f);
+                base_color = glm::mix(base_color, tint, 0.35f);
+                roof_color = glm::mix(roof_color, tint, 0.25f);
             }
-            float glow = 0.6f + 0.4f * std::sin(run_time * 1.5f + building.center.x * 0.05f);
-            glUniform3f(color_location, color.r * glow, color.g * glow, color.b * glow);
+            if (building.type == BuildingType::TownHall) {
+                glUniform3f(color_location, 0.95f, 0.75f, 0.25f);
+                glBindVertexArray(town_hall_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, town_hall_mesh.count);
+                glBindVertexArray(0);
+                glUniform1i(use_normals_location, 0);
+                glm::vec3 beacon_pos(building.center.x, base_y + 2.2f * house_scale, building.center.y);
+                glm::mat4 beacon = glm::translate(glm::mat4(1.0f), beacon_pos);
+                beacon = glm::scale(beacon, glm::vec3(0.12f, 0.8f, 0.12f));
+                glm::mat4 beacon_mvp = projection * view * beacon;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(beacon_mvp));
+                glUniform3f(color_location, 0.95f, 0.90f, 0.35f);
+                glBindVertexArray(cylinder_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, cylinder_mesh.count);
+                glBindVertexArray(0);
+                glm::mat4 beacon_top = glm::translate(glm::mat4(1.0f),
+                                                     beacon_pos + glm::vec3(0.0f, 0.55f, 0.0f));
+                beacon_top = glm::scale(beacon_top, glm::vec3(0.25f));
+                glm::mat4 beacon_top_mvp = projection * view * beacon_top;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(beacon_top_mvp));
+                glUniform3f(color_location, 0.98f, 0.95f, 0.45f);
+                glBindVertexArray(cone_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, cone_mesh.count);
+                glBindVertexArray(0);
+                glUniform1i(use_normals_location, 1);
+            } else if (building.type == BuildingType::Barracks) {
+                glUniform3f(color_location, 0.35f, 0.65f, 0.85f);
+                glBindVertexArray(barracks_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, barracks_mesh.count);
+                glBindVertexArray(0);
+            } else if (building.type == BuildingType::Armory) {
+                glUniform3f(color_location, 0.85f, 0.45f, 0.25f);
+                glBindVertexArray(armory_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, armory_mesh.count);
+                glBindVertexArray(0);
+            } else if (building.type == BuildingType::Watchtower) {
+                glUniform3f(color_location, 0.65f, 0.70f, 0.85f);
+                glBindVertexArray(watchtower_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, watchtower_mesh.count);
+                glBindVertexArray(0);
+            } else {
+                glUniform3f(color_location, base_color.r, base_color.g, base_color.b);
+                const Mesh& base_mesh = house_base_meshes[building.house_variant];
+                glBindVertexArray(base_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, base_mesh.count);
+                glBindVertexArray(0);
+
+                glUniform3f(color_location, roof_color.r, roof_color.g, roof_color.b);
+                const Mesh& roof_mesh = house_roof_meshes[building.house_variant];
+                glBindVertexArray(roof_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, roof_mesh.count);
+                glBindVertexArray(0);
+            }
+        }
+        glUniform1i(use_normals_location, 0);
+
+        if (house_wireframe_debug) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+            glLineWidth(1.1f);
+            glUniform3f(color_location, 0.12f, 0.18f, 0.25f);
+            for (const Building& building : buildings) {
+                float base_y = building.base_height;
+                if (building.platform_index >= 0 &&
+                    building.platform_index < static_cast<int>(platforms.size())) {
+                    base_y -= platforms[building.platform_index].fall_offset;
+                }
+                glm::mat4 model = glm::translate(glm::mat4(1.0f),
+                                                 glm::vec3(building.center.x, base_y, building.center.y));
+                model = glm::rotate(model, building.house_rotation, glm::vec3(0.0f, 1.0f, 0.0f));
+                float house_scale = building.size * 0.8f;
+                model = glm::scale(model, glm::vec3(house_scale, house_scale, house_scale));
+                glm::mat4 mvp = projection * view * model;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(mvp));
+                const Mesh& base_mesh = house_base_meshes[building.house_variant];
+                glBindVertexArray(base_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, base_mesh.count);
+                glBindVertexArray(0);
+                const Mesh& roof_mesh = house_roof_meshes[building.house_variant];
+                glBindVertexArray(roof_mesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, roof_mesh.count);
+                glBindVertexArray(0);
+            }
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+            glDisable(GL_BLEND);
+        }
+
+        if (spawn_debug) {
+            glUseProgram(program);
+            glUniform1i(use_vertex_color_location, 0);
+            glUniform1i(use_normals_location, 0);
+            glm::mat4 marker = glm::translate(glm::mat4(1.0f), last_spawn_debug_pos);
+            marker = glm::scale(marker, glm::vec3(0.25f));
+            glm::mat4 marker_mvp = projection * view * marker;
+            glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(marker_mvp));
+            glUniform3f(color_location, 0.95f, 0.35f, 0.20f);
             glBindVertexArray(cube_vao);
             glDrawArrays(GL_TRIANGLES, 0, 36);
             glBindVertexArray(0);
+            if (last_spawn_debug_platform >= 0 &&
+                last_spawn_debug_platform < static_cast<int>(platforms.size())) {
+                int plateau_index = platforms[last_spawn_debug_platform].plateau_index;
+                if (plateau_index >= 0 && plateau_index < static_cast<int>(g_plateaus.size())) {
+                    glm::vec2 center = g_plateaus[plateau_index].center;
+                    glm::vec2 half = g_plateaus[plateau_index].half;
+                    float height = g_plateaus[plateau_index].height;
+                    if (plateau_index < static_cast<int>(g_plateau_fall_offsets.size())) {
+                        height -= g_plateau_fall_offsets[plateau_index];
+                    }
+                    glUseProgram(ring_program);
+                    glm::mat4 ring_model = glm::translate(
+                        glm::mat4(1.0f),
+                        glm::vec3(center.x, height + 0.05f, center.y));
+                    ring_model = glm::scale(ring_model, glm::vec3(half.x, 1.0f, half.y));
+                    glm::mat4 ring_mvp = projection * view * ring_model;
+                    glUniformMatrix4fv(ring_mvp_location, 1, GL_FALSE, glm::value_ptr(ring_mvp));
+                    glUniform3f(ring_color_location, 0.95f, 0.40f, 0.20f);
+                    glUniform1f(ring_phase_location, 0.0f);
+                    glUniform1f(ring_alpha_location, 0.5f);
+                    glBindVertexArray(ring_vao);
+                    glDrawArrays(GL_TRIANGLES, 0, 6);
+                    glBindVertexArray(0);
+                    glUseProgram(program);
+                }
+            }
         }
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        glDisable(GL_BLEND);
 
-        if (state == GameState::Running && garlic_level > 0) {
+        // Town visuals are now represented by upgraded buildings.
+
+        if (state == GameState::Running) {
             glDisable(GL_DEPTH_TEST);
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glUseProgram(ring_program);
+            float capture_radius = glm::max(attack_radius, 2.2f);
+            float capture_radius_sq = capture_radius * capture_radius;
             for (const Building& building : buildings) {
                 if (building.owner == BuildingOwner::Player) {
                     continue;
                 }
-                glm::vec2 delta = building.center - glm::vec2(player_position.x, player_position.z);
-                float dist_sq = glm::dot(delta, delta);
-                bool nearby = dist_sq <= attack_radius * attack_radius;
+                if (building.platform_index < 0 ||
+                    building.platform_index >= static_cast<int>(platforms.size()) ||
+                    platforms[building.platform_index].state != PlatformState::Active) {
+                    continue;
+                }
+                bool nearby = false;
+                if (std::abs(player_position.y - building.base_height) <= 2.0f) {
+                    glm::vec2 delta = building.center - glm::vec2(player_position.x, player_position.z);
+                    float dist_sq = glm::dot(delta, delta);
+                    nearby = dist_sq <= capture_radius_sq;
+                }
+                if (!nearby) {
+                    for (const Ally& ally : allies) {
+                        if (!ally.alive) {
+                            continue;
+                        }
+                        if (std::abs(ally.position.y - building.base_height) > 2.0f) {
+                            continue;
+                        }
+                        glm::vec2 delta = building.center - glm::vec2(ally.position.x, ally.position.z);
+                        float dist_sq = glm::dot(delta, delta);
+                        if (dist_sq <= capture_radius_sq) {
+                            nearby = true;
+                            break;
+                        }
+                    }
+                }
                 if (!nearby && building.capture_timer <= 0.01f) {
                     continue;
                 }
                 float progress = glm::clamp(building.capture_timer / 5.0f, 0.0f, 1.0f);
-                glm::vec3 ring_pos(building.center.x, building.base_height + 0.05f, building.center.y);
+                float base_y = building.base_height;
+                if (building.platform_index >= 0 && building.platform_index < static_cast<int>(platforms.size())) {
+                    base_y -= platforms[building.platform_index].fall_offset;
+                }
+                glm::vec3 ring_pos(building.center.x, base_y + 0.05f, building.center.y);
                 glm::mat4 ring_model = glm::translate(glm::mat4(1.0f), ring_pos);
                 ring_model = glm::scale(ring_model, glm::vec3(1.8f, 1.0f, 1.8f));
                 glm::mat4 ring_mvp = projection * view * ring_model;
@@ -4486,23 +5590,33 @@ struct Obstacle {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glUseProgram(ring_program);
-            auto draw_decal = [&](const glm::vec3& pos, float radius) {
+            auto draw_decal = [&](const glm::vec3& pos, float radius, const glm::vec3& color,
+                                  float alpha, float phase) {
                 float y = TerrainHeightAt(pos.x, pos.z, pos.y) + 0.03f;
                 glm::mat4 ring_model = glm::translate(glm::mat4(1.0f), glm::vec3(pos.x, y, pos.z));
                 ring_model = glm::scale(ring_model, glm::vec3(radius, 1.0f, radius));
                 glm::mat4 ring_mvp = projection * view * ring_model;
                 glUniformMatrix4fv(ring_mvp_location, 1, GL_FALSE, glm::value_ptr(ring_mvp));
-                glUniform3f(ring_color_location, 0.05f, 0.05f, 0.08f);
-                glUniform1f(ring_phase_location, 0.35f);
-                glUniform1f(ring_alpha_location, 0.35f);
+                glUniform3f(ring_color_location, color.r, color.g, color.b);
+                glUniform1f(ring_phase_location, phase);
+                glUniform1f(ring_alpha_location, alpha);
                 glBindVertexArray(ring_vao);
                 glDrawArrays(GL_TRIANGLES, 0, 6);
                 glBindVertexArray(0);
             };
 
-            draw_decal(player_position, 0.75f);
+            draw_decal(player_position, 0.75f, glm::vec3(0.05f, 0.05f, 0.08f), 0.35f, 0.35f);
             for (const Enemy& enemy : enemies) {
-                draw_decal(enemy.position, 0.55f * enemy.scale);
+                draw_decal(enemy.position, 0.55f * enemy.scale, glm::vec3(0.05f, 0.05f, 0.08f), 0.35f, 0.35f);
+            }
+            if (selected_ally_id != -1) {
+                for (const Ally& ally : allies) {
+                    if (!ally.alive || ally.id != selected_ally_id) {
+                        continue;
+                    }
+                    draw_decal(ally.position, 0.6f, glm::vec3(0.15f, 0.85f, 0.35f), 0.65f, 0.6f);
+                    break;
+                }
             }
             glUseProgram(program);
             glDisable(GL_BLEND);
@@ -4561,6 +5675,9 @@ struct Obstacle {
                 ally_color = glm::vec3(0.35f, 0.85f, 0.95f);
             } else if (ally.state == UnitState::Guard) {
                 ally_color = glm::vec3(0.85f, 0.85f, 0.30f);
+            }
+            if (ally.gold) {
+                ally_color = glm::vec3(0.95f, 0.82f, 0.35f);
             }
             glUniform3f(color_location, ally_color.r, ally_color.g, ally_color.b);
             glm::vec3 base_pos = ally.position + glm::vec3(0.0f, 0.25f, 0.0f);
@@ -5258,10 +6375,97 @@ struct Obstacle {
             draw_text(margin + 6.0f, time_text_y,
                       "Time " + std::to_string(static_cast<int>(run_time)) + "s",
                       ui_dim, ui_projection);
+            draw_text(margin + 6.0f, time_text_y - font_height - 6.0f,
+                      "Points " + std::to_string(points),
+                      ui_white, ui_projection);
             if (freeze_timer > 0.0f) {
                 draw_text(margin + 6.0f, time_text_y + font_height + 4.0f,
                           "Freeze " + std::to_string(static_cast<int>(std::ceil(freeze_timer))) + "s",
                           ui_highlight, ui_projection);
+            }
+            int nearby_town = -1;
+            float town_dist_sq = 2.8f * 2.8f;
+            for (int i = 0; i < static_cast<int>(towns.size()); ++i) {
+                glm::vec3 delta = towns[i].position - player_position;
+                delta.y = 0.0f;
+                float dist = glm::dot(delta, delta);
+                if (dist < town_dist_sq) {
+                    nearby_town = i;
+                    town_dist_sq = dist;
+                }
+            }
+            if (nearby_town >= 0) {
+                std::string label = towns[nearby_town].ui_open ? "Town Open (T to close)"
+                                                               : "Press T to open Town";
+                draw_text(margin + 6.0f, time_text_y - font_height * 2.0f - 12.0f,
+                          label, ui_white, ui_projection);
+            }
+            int open_town_index = -1;
+            for (int i = 0; i < static_cast<int>(towns.size()); ++i) {
+                if (towns[i].ui_open) {
+                    open_town_index = i;
+                    break;
+                }
+            }
+            if (open_town_index >= 0) {
+                Town& town = towns[open_town_index];
+                int barracks_cost = 6 + town.barracks_level * 6;
+                int armory_cost = 8 + town.armory_level * 8;
+                int watch_cost = 10 + town.watchtower_level * 10;
+                float panel_w = 300.0f;
+                float panel_h = 170.0f;
+                float panel_x = margin;
+                float panel_y = time_text_y - panel_h - font_height;
+                glUniform1f(alpha_location, 0.75f);
+                draw_ui_quad(panel_x, panel_y, panel_w, panel_h,
+                             glm::vec3(0.05f, 0.07f, 0.10f), ui_projection);
+                glUniform1f(alpha_location, 1.0f);
+
+                float text_x = panel_x + 10.0f;
+                float y = panel_y + panel_h - 28.0f;
+                draw_text(text_x, y, "Town Upgrades", ui_white, ui_projection);
+                draw_text_with_font(ui_font_small, text_x + 170.0f, y + 4.0f,
+                                    "Points " + std::to_string(points),
+                                    ui_white, ui_projection);
+                y -= 26.0f;
+                draw_text_with_font(ui_font_small, text_x, y,
+                                    "1) Barracks", ui_white, ui_projection);
+                y -= 18.0f;
+                draw_text_with_font(ui_font_small, text_x, y,
+                                    "Level " + std::to_string(town.barracks_level) +
+                                        "  Spawns every " +
+                                        std::to_string(static_cast<int>(
+                                            glm::max(4.0f, 12.0f - 2.0f * static_cast<float>(town.barracks_level)))) + "s",
+                                    ui_white, ui_projection);
+                y -= 18.0f;
+                SDL_Color cost_color = points >= barracks_cost ? ui_white : ui_dim;
+                draw_text_with_font(ui_font_small, text_x, y,
+                                    "Cost " + std::to_string(barracks_cost), cost_color, ui_projection);
+                y -= 24.0f;
+                draw_text_with_font(ui_font_small, text_x, y,
+                                    "2) Armory", ui_white, ui_projection);
+                y -= 18.0f;
+                draw_text_with_font(ui_font_small, text_x, y,
+                                    "Level " + std::to_string(town.armory_level) +
+                                        "  +DMG/HP " + std::to_string(town.armory_level),
+                                    ui_white, ui_projection);
+                y -= 18.0f;
+                cost_color = points >= armory_cost ? ui_white : ui_dim;
+                draw_text_with_font(ui_font_small, text_x, y,
+                                    "Cost " + std::to_string(armory_cost), cost_color, ui_projection);
+                y -= 24.0f;
+                draw_text_with_font(ui_font_small, text_x, y,
+                                    "3) Watchtower", ui_white, ui_projection);
+                y -= 18.0f;
+                float wt_interval = 1.1f / (1.0f + 0.35f * static_cast<float>(town.watchtower_level));
+                draw_text_with_font(ui_font_small, text_x, y,
+                                    "Level " + std::to_string(town.watchtower_level) +
+                                        "  " + std::to_string(static_cast<int>(std::ceil(1.0f / glm::max(0.01f, wt_interval)))) + " shots/s",
+                                    ui_white, ui_projection);
+                y -= 18.0f;
+                cost_color = points >= watch_cost ? ui_white : ui_dim;
+                draw_text_with_font(ui_font_small, text_x, y,
+                                    "Cost " + std::to_string(watch_cost), cost_color, ui_projection);
             }
         }
 
@@ -5400,6 +6604,22 @@ struct Obstacle {
         glDeleteBuffers(1, &mesh.vbo);
     }
     for (Mesh& mesh : rock_meshes) {
+        glDeleteVertexArrays(1, &mesh.vao);
+        glDeleteBuffers(1, &mesh.vbo);
+    }
+    glDeleteVertexArrays(1, &town_hall_mesh.vao);
+    glDeleteBuffers(1, &town_hall_mesh.vbo);
+    glDeleteVertexArrays(1, &barracks_mesh.vao);
+    glDeleteBuffers(1, &barracks_mesh.vbo);
+    glDeleteVertexArrays(1, &armory_mesh.vao);
+    glDeleteBuffers(1, &armory_mesh.vbo);
+    glDeleteVertexArrays(1, &watchtower_mesh.vao);
+    glDeleteBuffers(1, &watchtower_mesh.vbo);
+    for (Mesh& mesh : house_base_meshes) {
+        glDeleteVertexArrays(1, &mesh.vao);
+        glDeleteBuffers(1, &mesh.vbo);
+    }
+    for (Mesh& mesh : house_roof_meshes) {
         glDeleteVertexArrays(1, &mesh.vao);
         glDeleteBuffers(1, &mesh.vbo);
     }
