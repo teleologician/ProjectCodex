@@ -5589,16 +5589,16 @@ struct Obstacle {
             if (building.owner == BuildingOwner::Enemy && building.spawner) {
                 float danger_pulse = 0.6f + 0.4f * std::sin(run_time * 4.0f + building.center.x * 0.12f);
                 glm::vec3 danger = building.alive_timer >= 120.0f
-                    ? glm::vec3(1.0f, 0.65f, 0.10f)
-                    : glm::vec3(1.0f, 0.15f, 0.20f);
-                base_color = glm::mix(base_color, danger, danger_pulse * 0.55f);
-                roof_color = glm::mix(roof_color, danger, danger_pulse * 0.35f);
+                    ? glm::vec3(1.0f, 0.75f, 0.10f)
+                    : glm::vec3(1.0f, 0.05f, 0.10f);
+                base_color = glm::mix(base_color, danger, danger_pulse * 0.85f);
+                roof_color = glm::mix(roof_color, danger, danger_pulse * 0.65f);
             } else if (building.owner == BuildingOwner::Player) {
                 glm::vec3 tint = building.veteran_timer >= 60.0f
-                    ? glm::vec3(0.70f, 0.35f, 0.95f)
-                    : glm::vec3(0.20f, 0.85f, 0.40f);
-                base_color = glm::mix(base_color, tint, 0.35f);
-                roof_color = glm::mix(roof_color, tint, 0.25f);
+                    ? glm::vec3(0.90f, 0.85f, 0.25f)
+                    : glm::vec3(0.05f, 0.95f, 0.25f);
+                base_color = glm::mix(base_color, tint, 0.7f);
+                roof_color = glm::mix(roof_color, tint, 0.6f);
             }
             if (building.type == BuildingType::TownHall) {
                 glUniform3f(color_location, 0.95f, 0.75f, 0.25f);
