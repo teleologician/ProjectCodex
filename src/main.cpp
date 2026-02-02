@@ -309,8 +309,10 @@ static noise::module::Perlin g_rock_noise;
 enum class StarterWeaponId {
     Garlic,
     HolyBomb,
+    Fireball,
     Shuriken,
     Boomerang,
+    Lightning,
     Cross,
     Stake,
     Crossbow,
@@ -327,8 +329,10 @@ std::vector<StarterWeaponOption> BuildStarterWeapons(bool unlock_cross, bool unl
     std::vector<StarterWeaponOption> options;
     options.push_back({StarterWeaponId::Garlic, "Garlic"});
     options.push_back({StarterWeaponId::HolyBomb, "Holy Bomb"});
+    options.push_back({StarterWeaponId::Fireball, "Fireball"});
     options.push_back({StarterWeaponId::Shuriken, "Shuriken"});
     options.push_back({StarterWeaponId::Boomerang, "Boomerang"});
+    options.push_back({StarterWeaponId::Lightning, "Lightning"});
     if (unlock_cross) {
         options.push_back({StarterWeaponId::Cross, "Cross"});
     }
@@ -1689,31 +1693,6 @@ int main() {
         const float step = 2.0f;
         for (float z = -ground_extent; z < ground_extent; z += step) {
             for (float x = -ground_extent; x < ground_extent; x += step) {
-                glm::vec2 p(x + step * 0.5f, z + step * 0.5f);
-                bool skip = false;
-                for (const Plateau& plateau : g_plateaus) {
-                    if (!plateau.active) {
-                        continue;
-                    }
-                    if (PointInRect(p, plateau.center, plateau.half)) {
-                        skip = true;
-                        break;
-                    }
-                }
-                if (!skip) {
-                    for (const RampTile& ramp : g_ramps) {
-                        if (!ramp.active) {
-                            continue;
-                        }
-                        if (PointInRect(p, ramp.center, ramp.half)) {
-                            skip = true;
-                            break;
-                        }
-                    }
-                }
-                if (skip) {
-                    continue;
-                }
                 glm::vec3 p00(x, BaseNoiseHeight(x, z), z);
                 glm::vec3 p10(x + step, BaseNoiseHeight(x + step, z), z);
                 glm::vec3 p11(x + step, BaseNoiseHeight(x + step, z + step), z + step);
@@ -2194,6 +2173,21 @@ int main() {
         glm::vec3(0.70f, 0.52f, 0.28f)
     };
 
+    enum class DamageSource {
+        None,
+        Garlic,
+        Fireball,
+        Shuriken,
+        Crossbow,
+        Bomb,
+        Stick,
+        Cross,
+        HolyWater,
+        Poison,
+        Boomerang,
+        Lightning
+    };
+
     struct Enemy {
         glm::vec3 position;
         float speed;
@@ -2204,6 +2198,8 @@ int main() {
         float phase;
         int type;
         bool elite;
+        int id = -1;
+        DamageSource last_hit_source = DamageSource::None;
         float hit_flash = 0.0f;
         float boomerang_hit_timer = 0.0f;
     };
@@ -2488,6 +2484,7 @@ struct Obstacle {
     glm::vec2 max;
     bool is_ramp_wall = false;
     float height = 0.0f;
+    float min_height = 0.0f;
     bool is_building = false;
     BuildingOwner owner = BuildingOwner::Neutral;
 };
@@ -2498,10 +2495,25 @@ struct Obstacle {
         float lifetime;
         int damage;
         glm::vec3 color;
+        DamageSource source = DamageSource::None;
         int pierce = 0;
+        int bounce_remaining = 0;
+        float bounce_range = 0.0f;
+        int last_hit_id = -1;
+        float last_hit_timer = 0.0f;
+        float damage_scale = 1.0f;
+        float damage_falloff = 1.0f;
         float spin_speed = 0.0f;
         float spin_offset = 0.0f;
         int style = 0;
+    };
+
+    struct LightningArc {
+        glm::vec3 a;
+        glm::vec3 b;
+        float timer = 0.0f;
+        float life = 0.18f;
+        float seed = 0.0f;
     };
 
     struct Boomerang {
@@ -2586,6 +2598,8 @@ struct Obstacle {
         HolyWaterUpgrade,
         PoisonBomb,
         PoisonBombUpgrade,
+        Lightning,
+        LightningUpgrade,
         Bomb,
         BombUpgrade,
         MaxHealth,
@@ -2662,6 +2676,7 @@ struct Obstacle {
     float run_time = 0.0f;
     const float win_time = 300.0f;
     int enemies_killed = 0;
+    int next_enemy_id = 1;
     int coins_earned = 0;
     int points = 0;
 
@@ -2673,13 +2688,22 @@ struct Obstacle {
     RunState run_state;
     int shuriken_level = 0;
     float shuriken_timer = 0.0f;
-    float shuriken_cooldown = 2.0f;
-    int shuriken_damage = 1;
+    float shuriken_cooldown = 1.6f;
+    int shuriken_damage = 2;
+    int shuriken_bounces = 0;
+    float shuriken_bounce_range = 3.2f;
     int boomerang_level = 0;
     float boomerang_timer = 0.0f;
     float boomerang_cooldown = 3.0f;
     int boomerang_damage = 2;
     std::vector<Boomerang> boomerangs;
+    int lightning_level = 0;
+    float lightning_timer = 0.0f;
+    float lightning_cooldown = 2.4f;
+    int lightning_damage = 4;
+    int lightning_bounces = 3;
+    float lightning_range = 4.5f;
+    std::vector<LightningArc> lightning_arcs;
     int player_health = 10;
     int player_max_health = 10;
     float player_speed = 4.0f;
@@ -2697,6 +2721,23 @@ struct Obstacle {
     bool spawn_debug = false;
     glm::vec3 last_spawn_debug_pos(0.0f);
     int last_spawn_debug_platform = -1;
+    bool weapon_test_mode = false;
+    float weapon_test_timer = 0.0f;
+    std::array<int, 12> weapon_kills{};
+    const char* weapon_kill_names[12] = {
+        "None",
+        "Garlic",
+        "Fireball",
+        "Shuriken",
+        "Crossbow",
+        "Bomb",
+        "Stake",
+        "Cross",
+        "HolyWater",
+        "Poison",
+        "Boomerang",
+        "Lightning"
+    };
     bool minimap_visible = true;
     float minimap_radius = 28.0f;
     bool town_naming_active = false;
@@ -2751,43 +2792,57 @@ struct Obstacle {
     const float player_contact_radius = 0.7f;
     const float enemy_spawn_min_dist = 5.0f;
 
+    struct WeaponTuning {
+        int base_damage;
+        float base_cooldown;
+        float cooldown_floor;
+        int damage_per_level;
+        float cooldown_step;
+    };
+
+    const WeaponTuning fireball_tuning{4, 1.3f, 0.5f, 1, 0.1f};
+    const WeaponTuning shuriken_tuning{2, 1.4f, 0.7f, 1, 0.1f};
+    const WeaponTuning crossbow_tuning{4, 1.0f, 0.4f, 1, 0.08f};
+    const WeaponTuning bomb_tuning{5, 2.3f, 1.1f, 2, 0.2f};
+    const WeaponTuning lightning_tuning{4, 2.4f, 1.3f, 1, 0.15f};
+
     int garlic_level = 1;
     int magnet_level = 0;
     int fireball_level = 0;
     float fireball_timer = 0.0f;
-    float fireball_cooldown = 1.5f;
-    int fireball_damage = 2;
+    float fireball_cooldown = 1.3f;
+    int fireball_damage = 4;
     int crossbow_level = 0;
     float crossbow_timer = 0.0f;
-    float crossbow_cooldown = 1.2f;
-    int crossbow_damage = 2;
+    float crossbow_cooldown = 1.0f;
+    int crossbow_damage = 4;
     int stick_level = 0;
     float stick_timer = 0.0f;
     float stick_flash_timer = 0.0f;
     float stick_cooldown = 0.9f;
     float stick_range = 1.8f;
-    int stick_damage = 2;
+    int stick_damage = 3;
     int cross_level = 0;
     float cross_timer = 0.0f;
-    float cross_tick = 0.45f;
+    float cross_tick = 0.38f;
     float cross_orbit_radius = 1.6f;
     float cross_hit_radius = 0.7f;
-    int cross_damage = 2;
+    int cross_damage = 3;
     int holywater_level = 0;
     float holywater_timer = 0.0f;
-    float holywater_cooldown = 2.4f;
+    float holywater_cooldown = 2.0f;
     float holywater_radius = 2.0f;
-    int holywater_damage = 1;
+    int holywater_damage = 2;
     int poison_level = 0;
     float poison_timer = 0.0f;
-    float poison_cooldown = 3.0f;
+    float poison_cooldown = 2.4f;
     float poison_radius = 2.4f;
-    int poison_damage = 1;
+    int poison_damage = 2;
     int bomb_level = 0;
     float bomb_timer = 0.0f;
-    float bomb_cooldown = 2.5f;
+    float bomb_cooldown = 2.3f;
     float bomb_radius = 2.8f;
-    int bomb_damage = 4;
+    int bomb_damage = 5;
 
     float freeze_timer = 0.0f;
     float nuke_flash_timer = 0.0f;
@@ -2795,12 +2850,30 @@ struct Obstacle {
     const float nuke_radius = balance.nuke_radius;
     const int nuke_damage = balance.nuke_damage;
     const float nuke_cooldown = balance.nuke_cooldown;
-    float jump_timer = 0.0f;
-    float jump_release_timer = 0.0f;
     float jump_cooldown_timer = 0.0f;
-    const float jump_duration = 0.35f;
-    const float jump_cooldown = 0.8f;
-    const float jump_height = 1.2f;
+    const float jump_cooldown = 0.1f;
+    const float jump_height = 3.0f;
+    const float jump_gravity = 7.5f;
+    float vertical_velocity = 0.0f;
+    int jumps_used = 0;
+    int max_jumps = 2;
+    bool grounded = false;
+    float coyote_timer = 0.0f;
+    float jump_buffer_timer = 0.0f;
+    bool jump_was_down = false;
+    bool dash_active = false;
+    float dash_timer = 0.0f;
+    float dash_cooldown_timer = 0.0f;
+    int dash_used = 0;
+    bool dash_was_down = false;
+    glm::vec3 dash_velocity(0.0f);
+    glm::vec3 dash_dir(0.0f, 0.0f, 1.0f);
+    float dash_vertical_boost = 0.0f;
+    const float dash_burst_time = 0.20f;
+    const float dash_sail_time = 0.50f;
+    const float dash_speed_mult = 3.0f;
+    const float dash_sail_decay = 1.1f;
+    const float dash_cooldown = 2.5f;
     float enemy_spawner_timer = 0.0f;
     const float enemy_spawner_interval = 35.0f;
     float pickup_magnet_radius = 1.2f;
@@ -2893,7 +2966,8 @@ struct Obstacle {
             box.min = building.center - glm::vec2(block_half, block_half);
             box.max = building.center + glm::vec2(block_half, block_half);
             box.is_ramp_wall = false;
-            box.height = building.base_height;
+            box.min_height = building.base_height - 0.2f;
+            box.height = building.base_height + building.height;
             box.is_building = true;
             box.owner = building.owner;
             obstacles.push_back(box);
@@ -2921,12 +2995,15 @@ struct Obstacle {
             float z_s = center.y - half.y;
             float x_e = center.x + half.x;
             float x_w = center.x - half.x;
+            float wall_height = 2.2f;
+            float wall_base = platforms[town.platform_index].ground_height;
             auto add_wall_box = [&](glm::vec2 min, glm::vec2 max) {
                 Obstacle wall;
                 wall.min = min;
                 wall.max = max;
                 wall.is_ramp_wall = false;
-                wall.height = 0.0f;
+                wall.min_height = wall_base - 0.2f;
+                wall.height = wall_base + wall_height;
                 wall.is_building = true;
                 wall.owner = BuildingOwner::Player;
                 obstacles.push_back(wall);
@@ -3117,8 +3194,27 @@ struct Obstacle {
         }
 
         float phase = unit_dist(rng) * glm::two_pi<float>();
-        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite, 0.0f, 0.0f});
+        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite, next_enemy_id++, DamageSource::None, 0.0f, 0.0f});
         spawn_poofs.push_back(SpawnPoof{position, 0.0f, 0.5f});
+    };
+
+    auto spawn_training_pack = [&](int count) {
+        enemies.clear();
+        float radius = 6.0f;
+        for (int i = 0; i < count; ++i) {
+            float angle = static_cast<float>(i) * glm::two_pi<float>() / static_cast<float>(count);
+            glm::vec3 position = player_position + glm::vec3(std::cos(angle), 0.0f, std::sin(angle)) * radius;
+            position.y = TerrainHeightAt(position.x, position.z, position.y);
+            int health = 12;
+            float speed = 1.2f;
+            int damage = 1;
+            float scale = 0.7f;
+            glm::vec3 color(0.35f, 0.55f, 0.85f);
+            float phase = unit_dist(rng) * glm::two_pi<float>();
+            int type = 0;
+            bool elite = false;
+            enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite, next_enemy_id++, DamageSource::None, 0.0f, 0.0f});
+        }
     };
 
     auto spawn_enemy_at = [&](const glm::vec3& origin, int health_mult, const glm::vec3& color_override, bool force_elite) {
@@ -3211,7 +3307,7 @@ struct Obstacle {
         }
 
         float phase = unit_dist(rng) * glm::two_pi<float>();
-        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite, 0.0f, 0.0f});
+        enemies.push_back(Enemy{position, speed, health, damage, scale, color, phase, type, elite, next_enemy_id++, DamageSource::None, 0.0f, 0.0f});
         spawn_poofs.push_back(SpawnPoof{position, 0.0f, 0.5f});
     };
 
@@ -3668,14 +3764,16 @@ struct Obstacle {
         StarterWeaponId starter_id = starters[starter_weapon_index].id;
 
         garlic_level = starter_id == StarterWeaponId::Garlic ? 1 : 0;
-        fireball_level = 0;
+        fireball_level = starter_id == StarterWeaponId::Fireball ? 1 : 0;
         fireball_timer = 0.0f;
-        fireball_cooldown = 1.5f;
-        fireball_damage = 2 + meta_damage_level;
+        fireball_cooldown = fireball_tuning.base_cooldown;
+        fireball_damage = fireball_tuning.base_damage + meta_damage_level;
         shuriken_level = starter_id == StarterWeaponId::Shuriken ? 1 : 0;
         shuriken_timer = 0.0f;
-        shuriken_cooldown = 2.0f;
-        shuriken_damage = 1 + meta_damage_level / 2;
+        shuriken_cooldown = shuriken_tuning.base_cooldown;
+        shuriken_damage = shuriken_tuning.base_damage + meta_damage_level / 2;
+        shuriken_bounces = 1;
+        shuriken_bounce_range = 3.2f;
         boomerang_level = starter_id == StarterWeaponId::Boomerang ? 1 : 0;
         boomerang_timer = 0.0f;
         boomerang_cooldown = 3.0f;
@@ -3683,35 +3781,42 @@ struct Obstacle {
         boomerangs.clear();
         crossbow_level = starter_id == StarterWeaponId::Crossbow ? 1 : 0;
         crossbow_timer = 0.0f;
-        crossbow_cooldown = 1.2f;
-        crossbow_damage = 2 + meta_damage_level;
+        crossbow_cooldown = crossbow_tuning.base_cooldown;
+        crossbow_damage = crossbow_tuning.base_damage + meta_damage_level;
         stick_level = starter_id == StarterWeaponId::Stake ? 1 : 0;
         stick_timer = 0.0f;
         stick_flash_timer = 0.0f;
         stick_cooldown = 0.9f;
         stick_range = 1.8f;
-        stick_damage = 2 + meta_damage_level;
+        stick_damage = 3 + meta_damage_level;
         cross_level = starter_id == StarterWeaponId::Cross ? 1 : 0;
         cross_timer = 0.0f;
-        cross_tick = 0.45f;
+        cross_tick = 0.38f;
         cross_orbit_radius = 1.6f;
         cross_hit_radius = 0.7f;
-        cross_damage = 2 + meta_damage_level;
+        cross_damage = 3 + meta_damage_level;
         holywater_level = 0;
         holywater_timer = 0.0f;
-        holywater_cooldown = 2.4f;
+        holywater_cooldown = 2.0f;
         holywater_radius = 2.0f;
-        holywater_damage = 1 + meta_damage_level / 2;
+        holywater_damage = 2 + meta_damage_level / 2;
         poison_level = starter_id == StarterWeaponId::Caltrops ? 1 : 0;
         poison_timer = 0.0f;
-        poison_cooldown = 3.0f;
+        poison_cooldown = 2.4f;
         poison_radius = 2.4f;
-        poison_damage = 1 + meta_damage_level / 2;
+        poison_damage = 2 + meta_damage_level / 2;
         bomb_level = starter_id == StarterWeaponId::HolyBomb ? 1 : 0;
         bomb_timer = 0.0f;
-        bomb_cooldown = 2.5f;
+        bomb_cooldown = bomb_tuning.base_cooldown;
         bomb_radius = 2.8f;
-        bomb_damage = 4 + meta_damage_level;
+        bomb_damage = bomb_tuning.base_damage + meta_damage_level;
+        lightning_level = starter_id == StarterWeaponId::Lightning ? 1 : 0;
+        lightning_timer = 0.0f;
+        lightning_cooldown = lightning_tuning.base_cooldown;
+        lightning_damage = lightning_tuning.base_damage + meta_damage_level / 2;
+        lightning_bounces = 3;
+        lightning_range = 4.5f;
+        lightning_arcs.clear();
 
         if (garlic_level > 0) {
             attack_radius = 2.2f * std::pow(1.1f, static_cast<float>(garlic_level - 1));
@@ -3723,8 +3828,12 @@ struct Obstacle {
         player_damage_timer = 0.0f;
         run_time = 0.0f;
         enemies_killed = 0;
+        next_enemy_id = 1;
         coins_earned = 0;
         points = 0;
+        weapon_kills.fill(0);
+        weapon_test_mode = false;
+        weapon_test_timer = 0.0f;
         run_state.towns_captured_count = 0;
         run_state.played_tutorial = tutorial_seen;
         run_state.played_first_house = first_house_seen;
@@ -3752,6 +3861,18 @@ struct Obstacle {
             save_data.tutorial_seen = 1;
             save_progress();
         }
+        jump_cooldown_timer = 0.0f;
+        vertical_velocity = 0.0f;
+        jumps_used = 0;
+        grounded = true;
+        coyote_timer = 0.0f;
+        jump_buffer_timer = 0.0f;
+        dash_active = false;
+        dash_timer = 0.0f;
+        dash_cooldown_timer = 0.0f;
+        dash_used = 0;
+        dash_velocity = glm::vec3(0.0f);
+        dash_vertical_boost = 0.0f;
     };
 
     auto end_run = [&](bool won) {
@@ -3924,6 +4045,9 @@ struct Obstacle {
         if (box.is_ramp_wall) {
             return current_y <= box.height - 1.0f;
         }
+        if (box.is_building && box.height > 0.1f) {
+            return current_y >= box.min_height && current_y <= box.height + 0.6f;
+        }
         if (box.height <= 0.1f) {
             return true;
         }
@@ -3970,12 +4094,7 @@ struct Obstacle {
                 static_cast<float>(window_width) / static_cast<float>(window_height),
                 0.1f,
                 140.0f);
-            float jump_view_phase = jump_timer > 0.0f
-                ? (jump_duration - jump_timer) / jump_duration
-                : 0.0f;
-            float jump_view_offset = jump_timer > 0.0f
-                ? std::sin(jump_view_phase * glm::pi<float>()) * jump_height
-                : 0.0f;
+            float jump_view_offset = 0.0f;
             glm::vec3 cam_dir(
                 std::cos(camera_pitch) * std::cos(camera_yaw),
                 std::sin(camera_pitch),
@@ -4272,6 +4391,11 @@ struct Obstacle {
                         floor_wireframe_debug = !floor_wireframe_debug;
                     } else if (key == SDLK_F4) {
                         floor_mode = (floor_mode + 1) % 3;
+                    } else if (key == SDLK_F7) {
+                        weapon_kills.fill(0);
+                        weapon_test_timer = 0.0f;
+                        weapon_test_mode = true;
+                        spawn_training_pack(20);
                     } else if (key == SDLK_m) {
                         minimap_visible = !minimap_visible;
                     } else if (key == SDLK_LEFTBRACKET) {
@@ -4405,23 +4529,28 @@ struct Obstacle {
                         switch (choice) {
                             case ItemId::Fireball:
                                 fireball_level = 1;
-                                fireball_damage = 2 + meta_damage_level;
-                                fireball_cooldown = 1.5f;
+                                fireball_damage = fireball_tuning.base_damage + meta_damage_level;
+                                fireball_cooldown = fireball_tuning.base_cooldown;
                                 break;
                             case ItemId::FireballUpgrade:
                                 fireball_level += 1;
-                                fireball_damage += 1;
-                                fireball_cooldown = glm::max(0.6f, fireball_cooldown - 0.1f);
+                                fireball_damage += fireball_tuning.damage_per_level;
+                                fireball_cooldown = glm::max(fireball_tuning.cooldown_floor,
+                                                            fireball_cooldown - fireball_tuning.cooldown_step);
                                 break;
                             case ItemId::Shuriken:
                                 shuriken_level = 1;
-                                shuriken_damage = 1 + meta_damage_level / 2;
-                                shuriken_cooldown = 2.0f;
+                                shuriken_damage = shuriken_tuning.base_damage + meta_damage_level / 2;
+                                shuriken_cooldown = shuriken_tuning.base_cooldown;
+                                shuriken_bounces = 1;
+                                shuriken_bounce_range = 3.2f;
                                 break;
                             case ItemId::ShurikenUpgrade:
                                 shuriken_level += 1;
-                                shuriken_damage += 1;
-                                shuriken_cooldown = glm::max(0.8f, shuriken_cooldown - 0.1f);
+                                shuriken_damage += shuriken_tuning.damage_per_level;
+                                shuriken_cooldown = glm::max(shuriken_tuning.cooldown_floor,
+                                                             shuriken_cooldown - shuriken_tuning.cooldown_step);
+                                shuriken_bounces = 1 + (shuriken_level >= 3 ? 1 : 0) + (shuriken_level >= 5 ? 1 : 0);
                                 break;
                             case ItemId::Boomerang:
                                 boomerang_level = 1;
@@ -4450,8 +4579,8 @@ struct Obstacle {
                             break;
                         case ItemId::Cross:
                             cross_level = 1;
-                            cross_damage = 2 + meta_damage_level;
-                            cross_tick = 0.45f;
+                            cross_damage = 3 + meta_damage_level;
+                            cross_tick = 0.38f;
                             cross_orbit_radius = 1.6f;
                             cross_hit_radius = 0.7f;
                             break;
@@ -4462,7 +4591,7 @@ struct Obstacle {
                             break;
                         case ItemId::Stick:
                             stick_level = 1;
-                            stick_damage = 2 + meta_damage_level;
+                            stick_damage = 3 + meta_damage_level;
                             stick_cooldown = 0.9f;
                             stick_range = 1.8f;
                             break;
@@ -4474,19 +4603,20 @@ struct Obstacle {
                             break;
                         case ItemId::Crossbow:
                             crossbow_level = 1;
-                            crossbow_damage = 2 + meta_damage_level;
-                            crossbow_cooldown = 1.2f;
+                            crossbow_damage = crossbow_tuning.base_damage + meta_damage_level;
+                            crossbow_cooldown = crossbow_tuning.base_cooldown;
                             break;
                         case ItemId::CrossbowUpgrade:
                             crossbow_level += 1;
-                            crossbow_damage += 1;
-                            crossbow_cooldown = glm::max(0.4f, crossbow_cooldown - 0.08f);
+                            crossbow_damage += crossbow_tuning.damage_per_level;
+                            crossbow_cooldown = glm::max(crossbow_tuning.cooldown_floor,
+                                                         crossbow_cooldown - crossbow_tuning.cooldown_step);
                             break;
                         case ItemId::HolyWater:
                             holywater_level = 1;
-                            holywater_damage = 1 + meta_damage_level / 2;
+                            holywater_damage = 2 + meta_damage_level / 2;
                             holywater_radius = 2.0f;
-                            holywater_cooldown = 2.4f;
+                            holywater_cooldown = 2.0f;
                             break;
                         case ItemId::HolyWaterUpgrade:
                             holywater_level += 1;
@@ -4496,9 +4626,9 @@ struct Obstacle {
                             break;
                         case ItemId::PoisonBomb:
                             poison_level = 1;
-                            poison_damage = 1 + meta_damage_level / 2;
+                            poison_damage = 2 + meta_damage_level / 2;
                             poison_radius = 2.4f;
-                            poison_cooldown = 3.0f;
+                            poison_cooldown = 2.4f;
                             break;
                         case ItemId::PoisonBombUpgrade:
                             poison_level += 1;
@@ -4508,15 +4638,31 @@ struct Obstacle {
                             break;
                         case ItemId::Bomb:
                             bomb_level = 1;
-                            bomb_damage = 4 + meta_damage_level;
-                            bomb_cooldown = 2.5f;
+                            bomb_damage = bomb_tuning.base_damage + meta_damage_level;
+                            bomb_cooldown = bomb_tuning.base_cooldown;
                             bomb_radius = 2.8f;
                             break;
                         case ItemId::BombUpgrade:
                             bomb_level += 1;
-                            bomb_damage += 2;
+                            bomb_damage += bomb_tuning.damage_per_level;
                             bomb_radius += 0.3f;
-                            bomb_cooldown = glm::max(1.2f, bomb_cooldown - 0.2f);
+                            bomb_cooldown = glm::max(bomb_tuning.cooldown_floor,
+                                                     bomb_cooldown - bomb_tuning.cooldown_step);
+                            break;
+                        case ItemId::Lightning:
+                            lightning_level = 1;
+                            lightning_damage = lightning_tuning.base_damage + meta_damage_level / 2;
+                            lightning_cooldown = lightning_tuning.base_cooldown;
+                            lightning_bounces = 3;
+                            lightning_range = 4.5f;
+                            break;
+                        case ItemId::LightningUpgrade:
+                            lightning_level += 1;
+                            lightning_damage += lightning_tuning.damage_per_level;
+                            lightning_bounces += 1;
+                            lightning_range += 0.6f;
+                            lightning_cooldown = glm::max(lightning_tuning.cooldown_floor,
+                                                          lightning_cooldown - lightning_tuning.cooldown_step);
                             break;
                             case ItemId::MaxHealth: {
                                 int bonus = static_cast<int>(std::ceil(player_max_health * 0.2f));
@@ -4616,18 +4762,122 @@ struct Obstacle {
                     std::cos(camera_yaw), 0.0f, std::sin(camera_yaw)));
             }
             player_move_amount = glm::clamp(move_len, 0.0f, 1.0f);
+            auto ground_height_at = [&](const glm::vec3& pos) {
+                float ground = TerrainHeightAt(pos.x, pos.z, pos.y);
+                int platform_index = find_platform_index_for_position(pos);
+                if (platform_index >= 0 && platform_index < static_cast<int>(platforms.size())) {
+                    const Platform& platform = platforms[platform_index];
+                    if (platform.state == PlatformState::Active || platform.state == PlatformState::Collapsing) {
+                        float top = platform.base_height - platform.fall_offset;
+                        if (vertical_velocity <= 0.0f && pos.y >= top - 0.05f) {
+                            ground = top;
+                        }
+                    } else if (platform.state == PlatformState::Landed || platform.state == PlatformState::ConvertedToTown) {
+                        ground = platform.ground_height;
+                    }
+                }
+                return ground;
+            };
+            float ground_y = ground_height_at(player_position);
+            bool on_ground = player_position.y <= ground_y + 0.05f;
+            if (on_ground) {
+                grounded = true;
+                coyote_timer = 0.10f;
+                jumps_used = 0;
+                dash_used = 0;
+                if (vertical_velocity < 0.0f) {
+                    vertical_velocity = 0.0f;
+                }
+            } else {
+                grounded = false;
+                coyote_timer = glm::max(0.0f, coyote_timer - delta_time);
+            }
+            auto do_jump = [&]() {
+                if (!(grounded || coyote_timer > 0.0f || jumps_used < max_jumps)) {
+                    return false;
+                }
+                if (jump_cooldown_timer > 0.0f) {
+                    return false;
+                }
+                float jump_speed = std::sqrt(2.0f * jump_gravity * jump_height);
+                vertical_velocity = jump_speed;
+                jumps_used = glm::min(max_jumps, jumps_used + 1);
+                jump_buffer_timer = 0.0f;
+                grounded = false;
+                jump_cooldown_timer = jump_cooldown;
+                return true;
+            };
+            bool jump_down = keys[SDL_SCANCODE_SPACE];
+            if (jump_down && !jump_was_down) {
+                if (!do_jump()) {
+                    jump_buffer_timer = 0.10f;
+                }
+            }
+            jump_was_down = jump_down;
+            if (jump_buffer_timer > 0.0f) {
+                jump_buffer_timer = glm::max(0.0f, jump_buffer_timer - delta_time);
+                if (jump_buffer_timer > 0.0f) {
+                    do_jump();
+                }
+            }
             if (jump_cooldown_timer > 0.0f) {
                 jump_cooldown_timer = glm::max(0.0f, jump_cooldown_timer - delta_time);
             }
-            if (jump_timer <= 0.0f && jump_cooldown_timer <= 0.0f &&
-                (keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_LSHIFT])) {
-                jump_timer = jump_duration;
-                jump_cooldown_timer = jump_cooldown;
+            bool dash_down = keys[SDL_SCANCODE_LSHIFT];
+                if (dash_down && !dash_was_down && dash_cooldown_timer <= 0.0f &&
+                    (grounded || dash_used == 0)) {
+                    dash_active = true;
+                    dash_timer = 0.0f;
+                    dash_cooldown_timer = dash_cooldown;
+                    dash_used += 1;
+                    if (move_len > 0.0f) {
+                        dash_dir = glm::normalize(move);
+                    } else {
+                        dash_dir = glm::normalize(glm::vec3(std::cos(camera_yaw), 0.0f, std::sin(camera_yaw)));
+                    }
+                    dash_velocity = dash_dir * (player_speed * dash_speed_mult);
+                    if (!grounded) {
+                        dash_vertical_boost = glm::max(dash_vertical_boost, 1.0f);
+                    }
+                }
+            dash_was_down = dash_down;
+            if (dash_cooldown_timer > 0.0f) {
+                dash_cooldown_timer = glm::max(0.0f, dash_cooldown_timer - delta_time);
+            }
+            if (dash_active) {
+                dash_timer += delta_time;
+                if (dash_timer > dash_burst_time) {
+                    dash_velocity *= glm::clamp(1.0f - dash_sail_decay * delta_time, 0.0f, 1.0f);
+                }
+                if (dash_timer >= (dash_burst_time + dash_sail_time)) {
+                    dash_active = false;
+                    dash_velocity = glm::vec3(0.0f);
+                }
             }
             glm::vec3 prev_player_position = player_position;
-            glm::vec3 desired = player_position + move * player_speed * delta_time;
+            glm::vec3 total_velocity = move * player_speed + dash_velocity;
+            glm::vec3 desired = player_position + total_velocity * delta_time;
             desired.x = glm::clamp(desired.x, -play_area_extent, play_area_extent);
             desired.z = glm::clamp(desired.z, -play_area_extent, play_area_extent);
+            if (dash_active && dash_timer > dash_burst_time && grounded) {
+                int platform_index = find_platform_index_for_position(player_position);
+                if (platform_index >= 0 &&
+                    platform_index < static_cast<int>(platforms.size()) &&
+                    platforms[platform_index].state == PlatformState::Active) {
+                    glm::vec2 center(0.0f);
+                    glm::vec2 half(0.0f);
+                    if (get_platform_bounds(platform_index, center, half)) {
+                        glm::vec2 min = center - half + glm::vec2(0.6f);
+                        glm::vec2 max = center + half - glm::vec2(0.6f);
+                        glm::vec2 clamped = glm::clamp(glm::vec2(desired.x, desired.z), min, max);
+                        if (clamped.x != desired.x || clamped.y != desired.z) {
+                            desired.x = clamped.x;
+                            desired.z = clamped.y;
+                            dash_velocity *= 0.2f;
+                        }
+                    }
+                }
+            }
             glm::vec2 current_xz(player_position.x, player_position.z);
             glm::vec2 desired_xz(desired.x, desired.z);
             desired.y = TerrainHeightAt(desired.x, desired.z, player_position.y);
@@ -4635,7 +4885,9 @@ struct Obstacle {
             const float player_radius = 0.6f;
             float current_height = TerrainHeightAt(current_xz.x, current_xz.y, player_position.y);
             float desired_height = TerrainHeightAt(desired_xz.x, desired_xz.y, player_position.y);
-            bool jump_active = jump_timer > 0.0f || jump_release_timer > 0.0f;
+            bool jump_active = !grounded;
+            float height_above_ground = player_position.y - current_height;
+            const float town_wall_jump_clear = 1.4f;
             bool blocked = !can_step(current_xz, desired_xz, max_step_height, player_position.y);
             if (blocked && jump_active) {
                 float jump_step_height = 8.0f;
@@ -4650,6 +4902,10 @@ struct Obstacle {
             }
             for (const Obstacle& box : obstacles) {
                 if (!obstacle_active(box, player_position.y)) {
+                    continue;
+                }
+                if (jump_active && box.is_building &&
+                    player_position.y >= box.height - 0.2f) {
                     continue;
                 }
                 if (jump_active && box.is_ramp_wall) {
@@ -4684,7 +4940,11 @@ struct Obstacle {
                     if (!obstacle_active(box, player_position.y)) {
                         continue;
                     }
-                    if (jump_timer > 0.0f && box.is_ramp_wall) {
+                    if (jump_active && box.is_building &&
+                        player_position.y >= box.height - 0.2f) {
+                        continue;
+                    }
+                    if (jump_active && box.is_ramp_wall) {
                         continue;
                     }
                     if (circle_intersects_aabb(slide_xz, player_radius, box)) {
@@ -4716,7 +4976,11 @@ struct Obstacle {
                     if (!obstacle_active(box, player_position.y)) {
                         continue;
                     }
-                    if (jump_timer > 0.0f && box.is_ramp_wall) {
+                    if (jump_active && box.is_building &&
+                        player_position.y >= box.height - 0.2f) {
+                        continue;
+                    }
+                    if (jump_active && box.is_ramp_wall) {
                         continue;
                     }
                     if (circle_intersects_aabb(slide_zz, player_radius, box)) {
@@ -4728,8 +4992,213 @@ struct Obstacle {
                         player_position.z = slide_z.z;
                     }
                 }
-                float target_y = TerrainHeightAt(player_position.x, player_position.z, player_position.y);
-                player_position.y = glm::mix(player_position.y, target_y, 0.35f);
+                float ground_target_y = ground_height_at(player_position);
+                float gravity_scale = vertical_velocity < 0.0f ? 0.45f : 1.0f;
+                if (dash_active && !grounded) {
+                    gravity_scale *= 0.25f;
+                    vertical_velocity = glm::max(vertical_velocity, 0.0f);
+                }
+                vertical_velocity -= jump_gravity * gravity_scale * delta_time;
+                player_position.y += vertical_velocity * delta_time;
+                if (dash_vertical_boost > 0.0f) {
+                    player_position.y += dash_vertical_boost * delta_time;
+                    dash_vertical_boost = glm::max(0.0f, dash_vertical_boost - delta_time * 2.8f);
+                }
+                if (player_position.y <= ground_target_y) {
+                    player_position.y = ground_target_y;
+                    if (vertical_velocity < 0.0f) {
+                        vertical_velocity = 0.0f;
+                    }
+                    grounded = true;
+                }
+                if (jump_active && IsNearRampEdge(glm::vec2(player_position.x, player_position.z), 4.2f)) {
+                    float edge_step_height = 0.1f;
+                    if (ground_target_y <= player_position.y + edge_step_height) {
+                        player_position.y = glm::max(player_position.y, ground_target_y);
+                    }
+                }
+                bool climbed_to_plateau = false;
+                {
+                    const float edge_climb_radius = 0.10f;
+                    const float edge_step_height = 0.10f;
+                    const float edge_snap_offset = 0.12f;
+                    bool climb_attempt = (jump_active || dash_active) && !grounded &&
+                                         height_above_ground > 0.2f &&
+                                         (vertical_velocity > 0.0f || dash_active);
+                    if (climb_attempt) {
+                        float best_dist = edge_climb_radius;
+                        int best_plateau = -1;
+                        glm::vec2 best_clamped(0.0f);
+                        for (int p = 0; p < static_cast<int>(g_plateaus.size()); ++p) {
+                            const Plateau& plateau = g_plateaus[p];
+                            if (!plateau.active) {
+                                continue;
+                            }
+                            glm::vec2 min = plateau.center - plateau.half;
+                            glm::vec2 max = plateau.center + plateau.half;
+                            glm::vec2 pos_xz(player_position.x, player_position.z);
+                            if (PointInRect(pos_xz, plateau.center, plateau.half)) {
+                                continue;
+                            }
+                            glm::vec2 clamped = glm::clamp(pos_xz, min, max);
+                            glm::vec2 delta = pos_xz - clamped;
+                            float dist = glm::length(delta);
+                            if (dist <= best_dist) {
+                                best_dist = dist;
+                                best_plateau = p;
+                                best_clamped = clamped;
+                            }
+                        }
+                        if (best_plateau >= 0) {
+                            float plateau_height = PlateauHeightAt(best_clamped);
+                            float lower = plateau_height - edge_step_height;
+                            float upper = plateau_height + 0.05f;
+                            if (player_position.y >= lower &&
+                                player_position.y <= upper &&
+                                player_position.y > ground_target_y + 0.15f) {
+                                player_position.x = best_clamped.x;
+                                player_position.z = best_clamped.y;
+                                player_position.y = plateau_height + edge_snap_offset;
+                                vertical_velocity = 0.0f;
+                                grounded = true;
+                                jumps_used = 0;
+                                climbed_to_plateau = true;
+                            }
+                        }
+                    }
+                }
+                glm::vec2 push_dir_xz(0.0f);
+                if (move_len > 0.01f) {
+                    push_dir_xz = glm::normalize(glm::vec2(move.x, move.z));
+                } else if (glm::length(dash_velocity) > 0.01f) {
+                    push_dir_xz = glm::normalize(glm::vec2(dash_velocity.x, dash_velocity.z));
+                }
+                if (glm::length(push_dir_xz) > 0.0f) {
+                    push_dir_xz = -push_dir_xz;
+                }
+                auto resolve_building_penetration = [&](glm::vec3& pos, const glm::vec3& prev_pos, glm::vec3* vel_opt) {
+                    const float eps = 1e-6f;
+                    const float slop = 0.001f;
+                    const float max_step = 0.45f;
+                    auto compute_push = [&](const glm::vec2& p, const Obstacle& box, glm::vec2& out_push) -> bool {
+                        glm::vec2 q = glm::clamp(p, box.min, box.max);
+                        glm::vec2 d = p - q;
+                        float dist2 = glm::dot(d, d);
+                        float r = player_radius;
+                        if (dist2 >= r * r) {
+                            return false;
+                        }
+                        if (dist2 > eps) {
+                            float dist = std::sqrt(dist2);
+                            glm::vec2 n = d / dist;
+                            float penetration = r - dist;
+                            out_push = n * penetration;
+                            return true;
+                        }
+                        float left = p.x - box.min.x;
+                        float right = box.max.x - p.x;
+                        float down = p.y - box.min.y;
+                        float up = box.max.y - p.y;
+                        float min_d = left;
+                        glm::vec2 push_dir(-1.0f, 0.0f);
+                        if (right < min_d) {
+                            min_d = right;
+                            push_dir = glm::vec2(1.0f, 0.0f);
+                        }
+                        if (down < min_d) {
+                            min_d = down;
+                            push_dir = glm::vec2(0.0f, -1.0f);
+                        }
+                        if (up < min_d) {
+                            min_d = up;
+                            push_dir = glm::vec2(0.0f, 1.0f);
+                        }
+                        out_push = push_dir * (min_d + r);
+                        return true;
+                    };
+
+                    bool still_colliding = false;
+                    for (int iter = 0; iter < 6; ++iter) {
+                        glm::vec2 best_push(0.0f);
+                        float best_len = 0.0f;
+                        glm::vec2 total_push(0.0f);
+                        int total_hits = 0;
+                        glm::vec2 p(pos.x, pos.z);
+                        for (const Obstacle& box : obstacles) {
+                            if (!box.is_building) {
+                                continue;
+                            }
+                            if (!obstacle_active(box, pos.y)) {
+                                continue;
+                            }
+                            glm::vec2 push(0.0f);
+                            if (!compute_push(p, box, push)) {
+                                continue;
+                            }
+                            float len = glm::length(push);
+                            if (len > best_len) {
+                                best_len = len;
+                                best_push = push;
+                            }
+                            total_push += push;
+                            total_hits += 1;
+                        }
+                        if (total_hits == 0) {
+                            still_colliding = false;
+                            break;
+                        }
+                        still_colliding = true;
+                        glm::vec2 chosen = glm::length(total_push) > 1e-5f ? total_push : best_push;
+                        float chosen_len = glm::length(chosen);
+                        if (chosen_len > eps) {
+                            glm::vec2 n = chosen / chosen_len;
+                            chosen = n * glm::min(chosen_len + slop, max_step);
+                        }
+                        pos.x += chosen.x;
+                        pos.z += chosen.y;
+                    }
+                    if (still_colliding) {
+                        pos.x = prev_pos.x;
+                        pos.z = prev_pos.z;
+                        if (vel_opt) {
+                            vel_opt->x = 0.0f;
+                            vel_opt->z = 0.0f;
+                        }
+                    }
+                };
+                for (const Obstacle& box : obstacles) {
+                    if (!box.is_building) {
+                        continue;
+                    }
+                    if (!obstacle_active(box, player_position.y)) {
+                        continue;
+                    }
+                    glm::vec2 pos_xz(player_position.x, player_position.z);
+                    if (!PointInRect(pos_xz, box.min, box.max)) {
+                        continue;
+                    }
+                    glm::vec2 center = (box.min + box.max) * 0.5f;
+                    glm::vec2 half = (box.max - box.min) * 0.5f;
+                    glm::vec2 local = pos_xz - center;
+                    glm::vec2 dir = glm::length(push_dir_xz) > 0.0f ? push_dir_xz : glm::normalize(local + glm::vec2(0.001f));
+                    float push_x = (half.x + player_radius) - std::abs(local.x);
+                    float push_z = (half.y + player_radius) - std::abs(local.y);
+                    if (push_x < push_z) {
+                        player_position.x = center.x + (local.x >= 0.0f ? (half.x + player_radius) : -(half.x + player_radius));
+                    } else {
+                        player_position.z = center.y + (local.y >= 0.0f ? (half.y + player_radius) : -(half.y + player_radius));
+                    }
+                    if (std::abs(dir.x) > std::abs(dir.y)) {
+                        player_position.x += dir.x * 0.12f;
+                    } else {
+                        player_position.z += dir.y * 0.12f;
+                    }
+                    break;
+                }
+                resolve_building_penetration(player_position, prev_player_position, &player_velocity);
+                if (climbed_to_plateau) {
+                    resolve_building_penetration(player_position, prev_player_position, &player_velocity);
+                }
                 if (delta_time > 0.0f) {
                     player_velocity = (player_position - prev_player_position) / delta_time;
                 } else {
@@ -5547,8 +6016,8 @@ struct Obstacle {
                     if (ally.state == UnitState::Follow) {
                         glm::vec2 offset = ally_ring_offset(ally.id, attack_radius * 0.75f);
                         target = player_position + glm::vec3(offset.x, 0.0f, offset.y);
-                        follow_jump_bonus = jump_timer > 0.0f ? 1.0f : 0.0f;
-                        ally_jump_active = (jump_timer > 0.0f || jump_release_timer > 0.0f);
+                        follow_jump_bonus = !grounded ? 1.0f : 0.0f;
+                        ally_jump_active = !grounded;
                     } else if (ally.state == UnitState::Guard) {
                         if (ally.guard_index >= 0 &&
                             ally.guard_index < static_cast<int>(buildings.size()) &&
@@ -5675,16 +6144,6 @@ struct Obstacle {
                 }
             }
 
-            float prev_jump_timer = jump_timer;
-            if (jump_timer > 0.0f) {
-                jump_timer = glm::max(0.0f, jump_timer - delta_time);
-            }
-            if (prev_jump_timer > 0.0f && jump_timer <= 0.0f) {
-                jump_release_timer = 0.12f;
-            }
-        if (jump_release_timer > 0.0f) {
-            jump_release_timer = glm::max(0.0f, jump_release_timer - delta_time);
-        }
         if (nuke_flash_timer > 0.0f) {
             nuke_flash_timer = glm::max(0.0f, nuke_flash_timer - delta_time);
         }
@@ -5716,9 +6175,10 @@ struct Obstacle {
                 }
             }
 
-            auto damage_enemy = [&](Enemy& enemy, int dmg) {
+            auto damage_enemy = [&](Enemy& enemy, int dmg, DamageSource source) {
                 enemy.health -= dmg;
                 enemy.hit_flash = 0.12f;
+                enemy.last_hit_source = source;
                 if (show_damage_text) {
                     DamageText text;
                     text.position = enemy.position + glm::vec3(0.0f, 0.9f, 0.0f);
@@ -5737,7 +6197,7 @@ struct Obstacle {
                     for (Enemy& enemy : enemies) {
                         glm::vec3 delta = enemy.position - player_position;
                         if (glm::length(delta) <= attack_radius) {
-                            damage_enemy(enemy, attack_damage);
+                            damage_enemy(enemy, attack_damage, DamageSource::Garlic);
                         }
                     }
                     for (Building& building : buildings) {
@@ -5785,12 +6245,16 @@ struct Obstacle {
                         direction = glm::vec3(0.0f, 0.0f, -1.0f);
                     }
                     direction = glm::normalize(direction);
-                    projectiles.push_back(Projectile{
-                        player_position + glm::vec3(0.0f, 0.6f, 0.0f),
-                        direction * 7.0f,
-                        3.0f,
-                        fireball_damage,
-                        glm::vec3(0.95f, 0.55f, 0.10f)});
+                    Projectile fireball;
+                    fireball.position = player_position + glm::vec3(0.0f, 0.6f, 0.0f);
+                    fireball.velocity = direction * 8.0f;
+                    fireball.lifetime = 3.2f;
+                    fireball.damage = fireball_damage;
+                    fireball.color = glm::vec3(0.95f, 0.55f, 0.10f);
+                    fireball.source = DamageSource::Fireball;
+                    fireball.pierce = 3;
+                    fireball.damage_falloff = 0.85f;
+                    projectiles.push_back(fireball);
                 }
             }
 
@@ -5818,42 +6282,46 @@ struct Obstacle {
                         direction = glm::vec3(0.0f, 0.0f, -1.0f);
                     }
                     direction = glm::normalize(direction);
-                    projectiles.push_back(Projectile{
-                        player_position + glm::vec3(0.0f, 0.6f, 0.0f),
-                        direction * 8.5f,
-                        2.5f,
-                        crossbow_damage,
-                        glm::vec3(0.70f, 0.45f, 0.20f)});
+                    Projectile bolt;
+                    bolt.position = player_position + glm::vec3(0.0f, 0.6f, 0.0f);
+                    bolt.velocity = direction * 9.5f;
+                    bolt.lifetime = 2.6f;
+                    bolt.damage = crossbow_damage;
+                    bolt.color = glm::vec3(0.70f, 0.45f, 0.20f);
+                    bolt.source = DamageSource::Crossbow;
+                    projectiles.push_back(bolt);
                 }
             }
 
             shuriken_timer += delta_time;
             if (shuriken_level > 0 && shuriken_timer >= shuriken_cooldown) {
                 shuriken_timer = 0.0f;
-                int count = 4;
+                int count = 6;
                 if (shuriken_level == 2) {
-                    count = 6;
-                } else if (shuriken_level == 3 || shuriken_level == 4) {
                     count = 8;
+                } else if (shuriken_level == 3 || shuriken_level == 4) {
+                    count = 10;
                 } else if (shuriken_level >= 5) {
                     count = 12;
                 }
-                int pierce = shuriken_level >= 4 ? 1 : 0;
-                float speed = 7.5f;
-                float lifetime = 1.5f + 0.1f * static_cast<float>(shuriken_level);
+                float speed = 8.5f;
+                float lifetime = 1.9f + 0.1f * static_cast<float>(shuriken_level);
                 for (int i = 0; i < count; ++i) {
                     float angle = static_cast<float>(i) * glm::two_pi<float>() / static_cast<float>(count);
                     glm::vec3 dir(std::cos(angle), 0.0f, std::sin(angle));
-                    projectiles.push_back(Projectile{
-                        player_position + glm::vec3(0.0f, 0.6f, 0.0f),
-                        dir * speed,
-                        lifetime,
-                        shuriken_damage,
-                        glm::vec3(0.70f, 0.95f, 0.95f),
-                        pierce,
-                        12.0f,
-                        unit_dist(rng) * glm::two_pi<float>(),
-                        1});
+                    Projectile shuriken;
+                    shuriken.position = player_position + glm::vec3(0.0f, 0.6f, 0.0f);
+                    shuriken.velocity = dir * speed;
+                    shuriken.lifetime = lifetime;
+                    shuriken.damage = shuriken_damage;
+                    shuriken.color = glm::vec3(0.70f, 0.95f, 0.95f);
+                    shuriken.source = DamageSource::Shuriken;
+                    shuriken.bounce_remaining = shuriken_bounces;
+                    shuriken.bounce_range = shuriken_bounce_range;
+                    shuriken.spin_speed = 14.0f;
+                    shuriken.spin_offset = unit_dist(rng) * glm::two_pi<float>();
+                    shuriken.style = 1;
+                    projectiles.push_back(shuriken);
                 }
             }
 
@@ -5893,6 +6361,71 @@ struct Obstacle {
                 }
             }
 
+            lightning_timer += delta_time;
+            if (lightning_level > 0 && lightning_timer >= lightning_cooldown) {
+                lightning_timer = 0.0f;
+                int first_index = -1;
+                float best_dist = lightning_range * lightning_range;
+                for (int i = 0; i < static_cast<int>(enemies.size()); ++i) {
+                    glm::vec3 delta = enemies[i].position - player_position;
+                    delta.y = 0.0f;
+                    float dist = glm::dot(delta, delta);
+                    if (dist <= best_dist) {
+                        best_dist = dist;
+                        first_index = i;
+                    }
+                }
+                if (first_index >= 0) {
+                    std::vector<int> chain;
+                    chain.reserve(lightning_bounces + 1);
+                    chain.push_back(first_index);
+                    int current = first_index;
+                    for (int hop = 0; hop < lightning_bounces; ++hop) {
+                        int next_index = -1;
+                        float hop_best = lightning_range * lightning_range;
+                        for (int i = 0; i < static_cast<int>(enemies.size()); ++i) {
+                            if (std::find(chain.begin(), chain.end(), i) != chain.end()) {
+                                continue;
+                            }
+                            glm::vec3 delta = enemies[i].position - enemies[current].position;
+                            delta.y = 0.0f;
+                            float dist = glm::dot(delta, delta);
+                            if (dist <= hop_best) {
+                                hop_best = dist;
+                                next_index = i;
+                            }
+                        }
+                        if (next_index < 0) {
+                            break;
+                        }
+                        chain.push_back(next_index);
+                        current = next_index;
+                    }
+                    glm::vec3 prev_pos = player_position + glm::vec3(0.0f, 0.8f, 0.0f);
+                    float damage_scale = 1.0f;
+                    for (int idx : chain) {
+                        Enemy& enemy = enemies[idx];
+                        glm::vec3 target_pos = enemy.position + glm::vec3(0.0f, 0.8f, 0.0f);
+                        int applied = static_cast<int>(std::round(lightning_damage * damage_scale));
+                        damage_enemy(enemy, applied, DamageSource::Lightning);
+                        damage_scale *= 0.85f;
+                        LightningArc arc;
+                        arc.a = prev_pos;
+                        arc.b = target_pos;
+                        arc.timer = 0.0f;
+                        arc.life = 0.18f;
+                        arc.seed = unit_dist(rng) * glm::two_pi<float>();
+                        lightning_arcs.push_back(arc);
+                        prev_pos = target_pos;
+                    }
+                    const size_t max_arcs = 64;
+                    if (lightning_arcs.size() > max_arcs) {
+                        lightning_arcs.erase(lightning_arcs.begin(),
+                                             lightning_arcs.begin() + (lightning_arcs.size() - max_arcs));
+                    }
+                }
+            }
+
             bomb_timer += delta_time;
             if (bomb_level > 0 && bomb_timer >= bomb_cooldown) {
                 bomb_timer = 0.0f;
@@ -5928,7 +6461,7 @@ struct Obstacle {
                     if (dist <= stick_range && dy <= 1.2f) {
                         glm::vec3 dir = glm::normalize(glm::vec3(delta.x, 0.0f, delta.z));
                         if (glm::dot(dir, forward) >= cos_half) {
-                            damage_enemy(enemy, stick_damage);
+                            damage_enemy(enemy, stick_damage, DamageSource::Stick);
                         }
                     }
                 }
@@ -5943,7 +6476,7 @@ struct Obstacle {
                     for (Enemy& enemy : enemies) {
                         glm::vec3 delta = enemy.position - orb;
                         if (glm::length(delta) <= cross_hit_radius) {
-                            damage_enemy(enemy, cross_damage);
+                            damage_enemy(enemy, cross_damage, DamageSource::Cross);
                         }
                     }
                 }
@@ -5983,7 +6516,7 @@ struct Obstacle {
                         glm::vec3 delta = enemy.position - bombs[i].position;
                         delta.y = 0.0f;
                         if (glm::length(delta) <= bomb_radius) {
-                            damage_enemy(enemy, bomb_damage);
+                            damage_enemy(enemy, bomb_damage, DamageSource::Bomb);
                         }
                     }
                     for (Building& building : buildings) {
@@ -6044,7 +6577,7 @@ struct Obstacle {
                     glm::vec2 flat(delta.x, delta.z);
                     if (dy <= 1.3f && glm::dot(flat, flat) <= 0.85f * 0.85f) {
                         if (enemy.boomerang_hit_timer <= 0.0f) {
-                            damage_enemy(enemy, boomerang.damage);
+                            damage_enemy(enemy, boomerang.damage, DamageSource::Boomerang);
                             enemy.boomerang_hit_timer = 0.35f;
                         }
                     }
@@ -6055,6 +6588,9 @@ struct Obstacle {
             for (size_t i = 0; i < projectiles.size();) {
                 projectiles[i].position += projectiles[i].velocity * delta_time;
                 projectiles[i].lifetime -= delta_time;
+                if (projectiles[i].last_hit_timer > 0.0f) {
+                    projectiles[i].last_hit_timer = glm::max(0.0f, projectiles[i].last_hit_timer - delta_time);
+                }
                 if (projectiles[i].lifetime <= 0.0f) {
                     projectiles[i] = projectiles.back();
                     projectiles.pop_back();
@@ -6062,13 +6598,22 @@ struct Obstacle {
                 }
 
                 bool hit = false;
+                Enemy* hit_enemy = nullptr;
                 for (Enemy& enemy : enemies) {
                     glm::vec3 delta = enemy.position - projectiles[i].position;
                     float dy = std::abs(delta.y);
                     glm::vec2 flat(delta.x, delta.z);
                     if (dy <= 1.4f && glm::dot(flat, flat) <= 0.7f * 0.7f) {
-                        damage_enemy(enemy, projectiles[i].damage);
+                        if (projectiles[i].last_hit_id == enemy.id && projectiles[i].last_hit_timer > 0.0f) {
+                            continue;
+                        }
+                        int applied = static_cast<int>(std::round(projectiles[i].damage * projectiles[i].damage_scale));
+                        damage_enemy(enemy, applied, projectiles[i].source);
+                        projectiles[i].damage_scale *= projectiles[i].damage_falloff;
+                        projectiles[i].last_hit_id = enemy.id;
+                        projectiles[i].last_hit_timer = 0.08f;
                         hit = true;
+                        hit_enemy = &enemy;
                         break;
                     }
                 }
@@ -6095,6 +6640,37 @@ struct Obstacle {
                     }
                 }
                 if (hit) {
+                    if (hit_enemy && projectiles[i].bounce_remaining > 0) {
+                        int best_id = -1;
+                        glm::vec3 best_pos(0.0f);
+                        float best_dist = projectiles[i].bounce_range * projectiles[i].bounce_range;
+                        for (const Enemy& enemy : enemies) {
+                            if (enemy.id == hit_enemy->id) {
+                                continue;
+                            }
+                            glm::vec3 delta = enemy.position - hit_enemy->position;
+                            delta.y = 0.0f;
+                            float dist = glm::dot(delta, delta);
+                            if (dist <= best_dist) {
+                                best_dist = dist;
+                                best_id = enemy.id;
+                                best_pos = enemy.position;
+                            }
+                        }
+                        if (best_id >= 0) {
+                            glm::vec3 dir = best_pos - hit_enemy->position;
+                            dir.y = 0.0f;
+                            if (glm::length(dir) > 0.001f) {
+                                dir = glm::normalize(dir);
+                                float speed = glm::length(projectiles[i].velocity);
+                                projectiles[i].velocity = dir * speed;
+                                projectiles[i].position = hit_enemy->position;
+                                projectiles[i].bounce_remaining -= 1;
+                                ++i;
+                                continue;
+                            }
+                        }
+                    }
                     if (projectiles[i].pierce > 0) {
                         projectiles[i].pierce -= 1;
                         ++i;
@@ -6121,7 +6697,7 @@ struct Obstacle {
                 }
             }
             player_damage_timer += delta_time;
-            if (jump_timer <= 0.0f && player_contact && player_damage_timer >= player_damage_interval) {
+            if (player_contact && player_damage_timer >= player_damage_interval) {
                 player_damage_timer = 0.0f;
                 player_health -= glm::max(1, contact_damage);
                 player_hurt_timer = 0.25f;
@@ -6140,6 +6716,10 @@ struct Obstacle {
                 if (enemies[i].health <= 0) {
                     gems.push_back(ExperienceGem{enemies[i].position});
                     enemies_killed += 1;
+                    int source_index = static_cast<int>(enemies[i].last_hit_source);
+                    if (source_index >= 0 && source_index < static_cast<int>(weapon_kills.size())) {
+                        weapon_kills[source_index] += 1;
+                    }
                     coins_earned += enemies[i].elite ? 3 : 1;
                     points += enemies[i].elite ? 2 : 1;
                     float drop_roll = unit_dist(rng);
@@ -6263,6 +6843,28 @@ struct Obstacle {
                 }
             }
 
+            if (weapon_test_mode) {
+                weapon_test_timer += delta_time;
+                if (weapon_test_timer >= 10.0f) {
+                    std::cout << "[WeaponTest] 10s kills:";
+                    for (size_t i = 1; i < weapon_kills.size(); ++i) {
+                        std::cout << " " << weapon_kill_names[i] << "=" << weapon_kills[i];
+                    }
+                    std::cout << std::endl;
+                    weapon_test_mode = false;
+                }
+            }
+
+            for (size_t i = 0; i < lightning_arcs.size();) {
+                lightning_arcs[i].timer += delta_time;
+                if (lightning_arcs[i].timer >= lightning_arcs[i].life) {
+                    lightning_arcs[i] = lightning_arcs.back();
+                    lightning_arcs.pop_back();
+                } else {
+                    ++i;
+                }
+            }
+
             for (size_t i = 0; i < ground_effects.size();) {
                 GroundEffect& effect = ground_effects[i];
                 effect.timer += delta_time;
@@ -6272,7 +6874,8 @@ struct Obstacle {
                     for (Enemy& enemy : enemies) {
                         glm::vec3 delta = enemy.position - effect.position;
                         if (glm::length(delta) <= effect.radius) {
-                            damage_enemy(enemy, effect.damage);
+                        DamageSource src = effect.type == GroundEffectType::Poison ? DamageSource::Poison : DamageSource::HolyWater;
+                        damage_enemy(enemy, effect.damage, src);
                         }
                     }
                 }
@@ -6332,6 +6935,11 @@ struct Obstacle {
                     pool.push_back(ItemChoice{ItemId::Boomerang, "Boomerang", 70});
                 } else if (boomerang_level < 5) {
                     pool.push_back(ItemChoice{ItemId::BoomerangUpgrade, "Boomerang +", 55});
+                }
+                if (lightning_level == 0) {
+                    pool.push_back(ItemChoice{ItemId::Lightning, "Lightning", 70});
+                } else if (lightning_level < 5) {
+                    pool.push_back(ItemChoice{ItemId::LightningUpgrade, "Lightning +", 55});
                 }
                 if (fireball_level == 0) {
                     pool.push_back(ItemChoice{ItemId::Fireball, "Fireball", 80});
@@ -6414,8 +7022,7 @@ struct Obstacle {
             static_cast<float>(window_width) / static_cast<float>(window_height),
             0.1f,
             140.0f);
-        float jump_view_phase = jump_timer > 0.0f ? (jump_duration - jump_timer) / jump_duration : 0.0f;
-        float jump_view_offset = jump_timer > 0.0f ? std::sin(jump_view_phase * glm::pi<float>()) * jump_height : 0.0f;
+        float jump_view_offset = 0.0f;
         glm::vec3 cam_dir(
             std::cos(camera_pitch) * std::cos(camera_yaw),
             std::sin(camera_pitch),
@@ -6521,6 +7128,48 @@ struct Obstacle {
         glBindVertexArray(ramp_surface_vao);
         glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(ramp_surface_vertices.size() / 3));
         glBindVertexArray(0);
+        glUniform1f(alpha_location, 1.0f);
+        glDisable(GL_BLEND);
+
+        // One-way jump rim (always visible).
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glUniform3f(color_location, 0.98f, 0.85f, 0.20f);
+        glUniform1f(alpha_location, 0.65f);
+        for (const Platform& platform : platforms) {
+            if (platform.state != PlatformState::Active &&
+                platform.state != PlatformState::Collapsing) {
+                continue;
+            }
+            if (platform.plateau_index < 0 ||
+                platform.plateau_index >= static_cast<int>(g_plateaus.size())) {
+                continue;
+            }
+            const Plateau& plateau = g_plateaus[platform.plateau_index];
+            glm::vec2 center = plateau.center;
+            glm::vec2 half = plateau.half;
+            float rim_width = 0.10f;
+            float rim_height = 0.08f;
+            float base_y = platform.base_height - platform.fall_offset + 0.02f;
+            auto draw_rim = [&](const glm::vec3& pos, const glm::vec3& scale) {
+                glm::mat4 model(1.0f);
+                model = glm::translate(model, pos);
+                model = glm::scale(model, scale);
+                glm::mat4 mvp = projection * view * model;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(mvp));
+                glBindVertexArray(cube_vao);
+                glDrawArrays(GL_TRIANGLES, 0, 36);
+                glBindVertexArray(0);
+            };
+            draw_rim(glm::vec3(center.x, base_y, center.y + half.y - rim_width * 0.5f),
+                     glm::vec3(half.x * 2.0f, rim_height, rim_width));
+            draw_rim(glm::vec3(center.x, base_y, center.y - half.y + rim_width * 0.5f),
+                     glm::vec3(half.x * 2.0f, rim_height, rim_width));
+            draw_rim(glm::vec3(center.x + half.x - rim_width * 0.5f, base_y, center.y),
+                     glm::vec3(rim_width, rim_height, half.y * 2.0f));
+            draw_rim(glm::vec3(center.x - half.x + rim_width * 0.5f, base_y, center.y),
+                     glm::vec3(rim_width, rim_height, half.y * 2.0f));
+        }
         glUniform1f(alpha_location, 1.0f);
         glDisable(GL_BLEND);
 
@@ -7044,8 +7693,7 @@ struct Obstacle {
             : glm::vec3(0.95f, 0.55f, 0.10f);
         glUniform3f(color_location, player_color.r, player_color.g, player_color.b);
 
-        float jump_phase = jump_timer > 0.0f ? (jump_duration - jump_timer) / jump_duration : 0.0f;
-        float jump_offset = jump_timer > 0.0f ? std::sin(jump_phase * glm::pi<float>()) * jump_height : 0.0f;
+        float jump_offset = 0.0f;
         glm::vec3 base_pos = player_position + glm::vec3(0.0f, 0.35f + jump_offset, 0.0f);
         float player_yaw = std::atan2(player_aim_dir.x, player_aim_dir.z);
         glm::mat4 base_transform = glm::translate(glm::mat4(1.0f), base_pos);
@@ -7570,6 +8218,46 @@ struct Obstacle {
             glEnable(GL_DEPTH_TEST);
         }
 
+        if (!lightning_arcs.empty()) {
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            for (const LightningArc& arc : lightning_arcs) {
+                float t = arc.timer / glm::max(0.001f, arc.life);
+                float pulse = 0.6f + 0.4f * std::sin(run_time * 20.0f + arc.seed);
+                float alpha = 0.85f * (1.0f - t);
+                glm::vec3 dir = arc.b - arc.a;
+                float len = glm::length(dir);
+                if (len < 0.001f) {
+                    continue;
+                }
+                dir /= len;
+                glm::vec3 up(0.0f, 1.0f, 0.0f);
+                if (std::abs(glm::dot(dir, up)) > 0.9f) {
+                    up = glm::vec3(0.0f, 0.0f, 1.0f);
+                }
+                glm::vec3 right = glm::normalize(glm::cross(up, dir));
+                glm::vec3 new_up = glm::normalize(glm::cross(dir, right));
+                glm::mat4 rot(1.0f);
+                rot[0] = glm::vec4(dir, 0.0f);
+                rot[1] = glm::vec4(new_up, 0.0f);
+                rot[2] = glm::vec4(right, 0.0f);
+                glm::vec3 mid = (arc.a + arc.b) * 0.5f;
+                glm::mat4 model = glm::translate(glm::mat4(1.0f), mid) * rot;
+                model = glm::scale(model, glm::vec3(len, 0.08f, 0.08f));
+                glm::mat4 mvp = projection * view * model;
+                glUniformMatrix4fv(mvp_location, 1, GL_FALSE, glm::value_ptr(mvp));
+                glUniform1f(alpha_location, alpha);
+                glUniform3f(color_location, 0.30f * pulse, 0.95f * pulse, 1.0f * pulse);
+                glBindVertexArray(cube_vao);
+                glDrawArrays(GL_TRIANGLES, 0, 36);
+                glBindVertexArray(0);
+                glUniform1f(alpha_location, 1.0f);
+            }
+            glDisable(GL_BLEND);
+            glEnable(GL_DEPTH_TEST);
+        }
+
         glUniform1i(use_normals_location, 0);
         for (const Projectile& projectile : projectiles) {
             glm::vec3 dir = projectile.velocity;
@@ -7766,6 +8454,14 @@ struct Obstacle {
                          timer_width, bar_height, glm::vec3(0.18f, 0.18f, 0.22f), ui_projection);
             draw_ui_quad(window_width - margin - timer_width, window_height - margin - bar_height,
                          timer_width * timer_ratio, bar_height, glm::vec3(0.85f, 0.72f, 0.25f), ui_projection);
+            int xp_needed = xp_needed_for_level(player_level);
+            float xp_ratio = xp_needed > 0 ? static_cast<float>(player_xp) / static_cast<float>(xp_needed) : 0.0f;
+            float xp_width = 180.0f;
+            float xp_y = window_height - margin - bar_height * 2.2f;
+            draw_ui_quad(window_width - margin - xp_width, xp_y, xp_width, bar_height,
+                         glm::vec3(0.18f, 0.18f, 0.22f), ui_projection);
+            draw_ui_quad(window_width - margin - xp_width, xp_y, xp_width * xp_ratio, bar_height,
+                         glm::vec3(0.20f, 0.65f, 0.95f), ui_projection);
             float cmd_w = 220.0f;
             float cmd_h = 60.0f;
             float cmd_x = window_width - margin - cmd_w;
@@ -7821,25 +8517,28 @@ struct Obstacle {
             glUniform1f(alpha_location, 1.0f);
         }
 
-        if (state == GameState::Running || state == GameState::Paused) {
-            float sx = 0.0f;
-            float sy = 0.0f;
+            if (state == GameState::Running || state == GameState::Paused) {
+                float sx = 0.0f;
+                float sy = 0.0f;
             if (project_to_screen(player_position + glm::vec3(0.0f, 1.6f, 0.0f), sx, sy)) {
                 float bar_w = 84.0f;
                 float bar_h = 8.0f;
                 float health_ratio = player_max_health > 0 ?
                     static_cast<float>(player_health) / static_cast<float>(player_max_health) : 0.0f;
-                int xp_needed = xp_needed_for_level(player_level);
-                float xp_ratio = xp_needed > 0 ? static_cast<float>(player_xp) / static_cast<float>(xp_needed) : 0.0f;
                 float x = sx - bar_w * 0.5f;
                 float y = sy + 18.0f;
                 glUniform1f(alpha_location, 0.9f);
                 draw_ui_quad(x, y, bar_w, bar_h, glm::vec3(0.10f, 0.10f, 0.12f), ui_projection);
                 draw_ui_quad(x, y, bar_w * health_ratio, bar_h, glm::vec3(0.90f, 0.20f, 0.25f), ui_projection);
-                y += bar_h + 4.0f;
-                draw_ui_quad(x, y, bar_w, bar_h * 0.85f, glm::vec3(0.10f, 0.10f, 0.12f), ui_projection);
-                draw_ui_quad(x, y, bar_w * xp_ratio, bar_h * 0.85f, glm::vec3(0.20f, 0.65f, 0.95f), ui_projection);
                 glUniform1f(alpha_location, 1.0f);
+                float dash_y = y + bar_h + 4.0f;
+                float dash_w = bar_w;
+                float dash_h = bar_h * 0.65f;
+                float dash_ratio = dash_cooldown > 0.0f
+                    ? glm::clamp(1.0f - dash_cooldown_timer / dash_cooldown, 0.0f, 1.0f)
+                    : 1.0f;
+                draw_ui_quad(x, dash_y, dash_w, dash_h, glm::vec3(0.12f, 0.12f, 0.14f), ui_projection);
+                draw_ui_quad(x, dash_y, dash_w * dash_ratio, dash_h, glm::vec3(0.95f, 0.80f, 0.25f), ui_projection);
             }
         }
 
@@ -8086,6 +8785,64 @@ struct Obstacle {
                           "Nuke " + std::to_string(static_cast<int>(std::ceil(nuke_cooldown_timer))) + "s",
                           ui_dim, ui_projection);
             }
+            std::string dash_phase = "none";
+            if (dash_active) {
+                dash_phase = (dash_timer <= dash_burst_time) ? "burst" : "sail";
+            }
+            draw_text(margin + 6.0f, time_text_y - font_height * 3.0f - 18.0f,
+                      std::string("Grounded ") + (grounded ? "Y" : "N") +
+                          "  Jumps " + std::to_string(jumps_used) + "/" + std::to_string(max_jumps),
+                      ui_dim, ui_projection);
+            draw_text(margin + 6.0f, time_text_y - font_height * 4.0f - 24.0f,
+                      "Coyote " + std::to_string(static_cast<int>(coyote_timer * 1000.0f)) + "ms" +
+                          "  Buffer " + std::to_string(static_cast<int>(jump_buffer_timer * 1000.0f)) + "ms",
+                      ui_dim, ui_projection);
+            draw_text(margin + 6.0f, time_text_y - font_height * 5.0f - 30.0f,
+                      "Dash " + dash_phase +
+                          "  CD " + std::to_string(static_cast<int>(std::ceil(dash_cooldown_timer))) + "s",
+                      ui_dim, ui_projection);
+            if (weapon_test_mode) {
+                float remaining = glm::max(0.0f, 10.0f - weapon_test_timer);
+                draw_text(margin + 6.0f, time_text_y - font_height * 6.0f - 36.0f,
+                          "WeaponTest " + std::to_string(static_cast<int>(remaining)) + "s" +
+                              "  Proj " + std::to_string(projectiles.size()),
+                          ui_highlight, ui_projection);
+                draw_text(margin + 6.0f, time_text_y - font_height * 7.0f - 42.0f,
+                          "Kills F " + std::to_string(weapon_kills[static_cast<int>(DamageSource::Fireball)]) +
+                              " S " + std::to_string(weapon_kills[static_cast<int>(DamageSource::Shuriken)]) +
+                              " X " + std::to_string(weapon_kills[static_cast<int>(DamageSource::Crossbow)]) +
+                              " B " + std::to_string(weapon_kills[static_cast<int>(DamageSource::Bomb)]) +
+                              " L " + std::to_string(weapon_kills[static_cast<int>(DamageSource::Lightning)]),
+                          ui_dim, ui_projection);
+            }
+            auto format_one_decimal = [&](float value) {
+                float rounded = std::round(value * 10.0f) / 10.0f;
+                return std::to_string(rounded);
+            };
+            int fireball_count = fireball_level > 0 ? 1 + (fireball_level - 1) / 2 : 0;
+            int crossbow_count = crossbow_level > 0 ? 1 + (crossbow_level - 1) / 2 : 0;
+            int shuriken_count = 0;
+            if (shuriken_level == 1) {
+                shuriken_count = 6;
+            } else if (shuriken_level == 2) {
+                shuriken_count = 8;
+            } else if (shuriken_level == 3 || shuriken_level == 4) {
+                shuriken_count = 10;
+            } else if (shuriken_level >= 5) {
+                shuriken_count = 12;
+            }
+            float fireball_dps = fireball_level > 0 ? (fireball_damage * fireball_count) / fireball_cooldown : 0.0f;
+            float crossbow_dps = crossbow_level > 0 ? (crossbow_damage * crossbow_count) / crossbow_cooldown : 0.0f;
+            float shuriken_dps = shuriken_level > 0 ? (shuriken_damage * shuriken_count) / shuriken_cooldown : 0.0f;
+            float bomb_dps = bomb_level > 0 ? bomb_damage / bomb_cooldown : 0.0f;
+            float lightning_dps = lightning_level > 0 ? (lightning_damage * (1.0f + lightning_bounces * 0.85f)) / lightning_cooldown : 0.0f;
+            draw_text(margin + 6.0f, time_text_y - font_height * 8.0f - 48.0f,
+                      "DPS F " + format_one_decimal(fireball_dps) +
+                          " S " + format_one_decimal(shuriken_dps) +
+                          " X " + format_one_decimal(crossbow_dps) +
+                          " B " + format_one_decimal(bomb_dps) +
+                          " L " + format_one_decimal(lightning_dps),
+                      ui_dim, ui_projection);
             if (freeze_timer > 0.0f) {
                 draw_text(margin + 6.0f, time_text_y + font_height + 4.0f,
                           "Freeze " + std::to_string(static_cast<int>(std::ceil(freeze_timer))) + "s",
